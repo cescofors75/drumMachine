@@ -33,17 +33,26 @@
 #define ENCODER_DT  22
 #define ENCODER_SW  13
 
-// Button BACK
-#define BUTTON_BACK 12
+// 3 BUTTON PANEL - SMART OPEN ANALOG BUTTONS (3 pins: GND, VCC, SIG)
+#define ANALOG_BUTTONS_PIN 34  // Pin analógico para leer los 3 botones
+
+// Rangos de valores ADC para cada botón (CALIBRADOS según medición real)
+#define BTN_PLAY_STOP_MIN  550   // Botón 1: Play/Stop (medido: ~663)
+#define BTN_PLAY_STOP_MAX  800
+#define BTN_MUTE_MIN       1350  // Botón 2: Mute/Clear (medido: ~1503)
+#define BTN_MUTE_MAX       1650
+#define BTN_BACK_MIN       2200  // Botón 3: Back (medido: ~2333)
+#define BTN_BACK_MAX       2500
+#define BTN_NONE_THRESHOLD 50    // Ningún botón presionado
 
 // Rotary Angle Potentiometer (3 pins)
 #define ROTARY_ANGLE_PIN 35
 
 // SD Card Reader (6 pins SPI)
 #define SD_CS   15
-#define SD_MOSI 23
-#define SD_MISO 19
-#define SD_SCK  18
+//#define SD_MOSI 23
+//#define SD_MISO 19
+//#define SD_SCK  18
 
 // ============================================
 // CONSTANTS
@@ -192,6 +201,10 @@ unsigned long lastDisplayChange = 0;
 int lastInstrumentPlayed = -1;
 unsigned long instrumentDisplayTime = 0;
 
+// Debug analog buttons
+unsigned long lastButtonDebug = 0;
+int lastAdcValue = -1;
+
 // ============================================
 // DATA
 // ============================================
@@ -248,7 +261,10 @@ void updateSequencer();
 void handleButtons();
 void handleEncoder();
 void handleBackButton();
+void handlePlayStopButton();
+void handleMuteButton();
 void handleVolume();
+void debugAnalogButtons();
 void triggerDrum(int track);
 void testButtonsOnBoot();
 void drawBootScreen();
@@ -365,7 +381,7 @@ void setupSDCard() {
     tft.setCursor(120, 130);
     tft.println("Checking SD Card...");
     
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+    SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, SD_CS);
     
     if (SD.begin(SD_CS)) {
         diagnostic.sdCardOk = true;
@@ -501,9 +517,15 @@ void setup() {
     pinMode(ENCODER_DT, INPUT_PULLUP);
     pinMode(ENCODER_SW, INPUT_PULLUP);
     
-    // Button BACK
-    pinMode(BUTTON_BACK, INPUT_PULLUP);
-    Serial.println("BACK button ready");
+    // 3 Button Panel - Analog Buttons
+    pinMode(ANALOG_BUTTONS_PIN, INPUT);
+    Serial.println("3 Analog Buttons ready on pin 34 (PLAY/STOP, MUTE, BACK)");
+    Serial.println("Module: SMART OPEN ANALOG BUTTONS (GND-VCC-SIG)");
+    Serial.println("\n╔═══════════════════════════════════════════════════╗");
+    Serial.println("║  CALIBRATION MODE ACTIVE                          ║");
+    Serial.println("║  Press each button and note ADC values in Serial  ║");
+    Serial.println("║  Then adjust ranges in lines 38-44 of main.cpp    ║");
+    Serial.println("╚═══════════════════════════════════════════════════╝\n");
     
     // Configurar interrupciones para CLK y DT
     attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), []() {
@@ -634,6 +656,12 @@ void loop() {
     
     handleButtons();
     handleEncoder();
+    
+    // DEBUG: Mostrar valores ADC de botones analógicos
+    debugAnalogButtons();
+    
+    handlePlayStopButton();
+    handleMuteButton();
     handleBackButton();
     
     if (currentTime - lastVolumeRead > 100) {
@@ -885,23 +913,175 @@ void handleEncoder() {
     lastBtn = btn;
 }
 
-void handleBackButton() {
-    static bool lastBackBtn = HIGH;
-    static unsigned long lastBackBtnTime = 0;
-    bool backBtn = digitalRead(BUTTON_BACK);
+void handlePlayStopButton() {
+    static bool lastPlayStopPressed = false;
+    static unsigned long lastPlayStopBtnTime = 0;
     unsigned long currentTime = millis();
     
-    // Detectar flanco de subida (cuando se suelta el botón) con debounce
-    if (backBtn == HIGH && lastBackBtn == LOW && (currentTime - lastBackBtnTime > 50)) {
+    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
+    bool playStopPressed = (adcValue >= BTN_PLAY_STOP_MIN && adcValue <= BTN_PLAY_STOP_MAX);
+    
+    // Detectar liberación del botón con debounce
+    if (!playStopPressed && lastPlayStopPressed && (currentTime - lastPlayStopBtnTime > 50)) {
+        lastPlayStopBtnTime = currentTime;
+        Serial.printf("► PLAY/STOP BUTTON (ADC: %d)\n", adcValue);
+        
+        // Solo funciona en SEQUENCER
+        if (currentScreen == SCREEN_SEQUENCER) {
+            isPlaying = !isPlaying;
+            if (!isPlaying) {
+                currentStep = 0;
+                setAllLEDs(0x0000);
+                updateStepLEDsForTrack(selectedTrack);
+            }
+            Serial.printf("   Sequencer: %s\n", isPlaying ? "PLAYING" : "STOPPED");
+            needsFullRedraw = true;
+        }
+    }
+    lastPlayStopPressed = playStopPressed;
+}
+
+void handleMuteButton() {
+    static bool lastMutePressed = false;
+    static unsigned long muteBtnPressTime = 0;
+    static bool holdProcessed = false;
+    unsigned long currentTime = millis();
+    
+    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
+    bool mutePressed = (adcValue >= BTN_MUTE_MIN && adcValue <= BTN_MUTE_MAX);
+    
+    // Detectar presión del botón (flanco de subida)
+    if (mutePressed && !lastMutePressed) {
+        muteBtnPressTime = currentTime;
+        holdProcessed = false;
+    }
+    
+    // Detectar HOLD (mantener presionado >1 segundo)
+    if (mutePressed && !holdProcessed && (currentTime - muteBtnPressTime > 1000)) {
+        holdProcessed = true;
+        Serial.printf("► MUTE BUTTON (HOLD - CLEAR INSTRUMENT) ADC: %d\n", adcValue);
+        
+        // Solo funciona en SEQUENCER
+        if (currentScreen == SCREEN_SEQUENCER) {
+            // Limpiar todos los steps del instrumento seleccionado
+            Pattern& pattern = patterns[currentPattern];
+            for (int s = 0; s < MAX_STEPS; s++) {
+                pattern.steps[selectedTrack][s] = false;
+            }
+            Serial.printf("   Cleared all steps for Track %d (%s)\n", 
+                         selectedTrack, trackNames[selectedTrack]);
+            
+            // Actualizar display
+            updateStepLEDsForTrack(selectedTrack);
+            needsFullRedraw = true;
+            
+            // Feedback visual
+            tm1.displayText("CLEARED ");
+            tm2.displayText(instrumentNames[selectedTrack]);
+        }
+    }
+    
+    // Detectar liberación del botón - MUTE
+    if (!mutePressed && lastMutePressed && !holdProcessed && (currentTime - muteBtnPressTime > 50)) {
+        Serial.printf("► MUTE BUTTON (CLICK - TOGGLE MUTE) ADC: %d\n", adcValue);
+        
+        // Solo funciona en SEQUENCER
+        if (currentScreen == SCREEN_SEQUENCER) {
+            // Toggle mute del track seleccionado
+            Pattern& pattern = patterns[currentPattern];
+            pattern.muted[selectedTrack] = !pattern.muted[selectedTrack];
+            
+            Serial.printf("   Track %d (%s): %s\n", 
+                         selectedTrack, trackNames[selectedTrack],
+                         pattern.muted[selectedTrack] ? "MUTED" : "UNMUTED");
+            
+            // Feedback visual
+            if (pattern.muted[selectedTrack]) {
+                tm1.displayText("MUTED  ");
+            } else {
+                tm1.displayText("UNMUTED");
+            }
+            tm2.displayText(instrumentNames[selectedTrack]);
+            
+            needsHeaderUpdate = true;
+        }
+    }
+    
+    lastMutePressed = mutePressed;
+}
+
+void handleBackButton() {
+    static bool lastBackPressed = false;
+    static unsigned long lastBackBtnTime = 0;
+    unsigned long currentTime = millis();
+    
+    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
+    bool backPressed = (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX);
+    
+    // Detectar liberación del botón con debounce
+    if (!backPressed && lastBackPressed && (currentTime - lastBackBtnTime > 50)) {
         lastBackBtnTime = currentTime;
-        Serial.println("► BACK BUTTON");
+        Serial.printf("► BACK BUTTON (ADC: %d)\n", adcValue);
         
         // Desde cualquier pantalla excepto menú, volver al menú
         if (currentScreen != SCREEN_MENU) {
             changeScreen(SCREEN_MENU);
         }
     }
-    lastBackBtn = backBtn;
+    lastBackPressed = backPressed;
+}
+
+void debugAnalogButtons() {
+    unsigned long currentTime = millis();
+    
+    // Mostrar valor ADC cada 200ms
+    if (currentTime - lastButtonDebug > 200) {
+        lastButtonDebug = currentTime;
+        
+        int adcValue = analogRead(ANALOG_BUTTONS_PIN);
+        
+        // Solo mostrar si el valor cambió significativamente
+        if (abs(adcValue - lastAdcValue) > 50) {
+            lastAdcValue = adcValue;
+            
+            Serial.printf("\n═══════════════════════════════════\n");
+            Serial.printf("ADC Value: %4d\n", adcValue);
+            
+            // Determinar qué botón está presionado
+            if (adcValue < BTN_NONE_THRESHOLD) {
+                Serial.println("Status: NO BUTTON PRESSED");
+            }
+            else if (adcValue >= BTN_PLAY_STOP_MIN && adcValue <= BTN_PLAY_STOP_MAX) {
+                Serial.println("Button: PLAY/STOP ✓");
+            }
+            else if (adcValue >= BTN_MUTE_MIN && adcValue <= BTN_MUTE_MAX) {
+                Serial.println("Button: MUTE/CLEAR ✓");
+            }
+            else if (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX) {
+                Serial.println("Button: BACK ✓");
+            }
+            else {
+                Serial.println("Status: ⚠️ VALUE OUT OF RANGE!");
+                Serial.println("\nSuggested action:");
+                
+                if (adcValue < BTN_PLAY_STOP_MIN) {
+                    Serial.printf("  → Lower BTN_PLAY_STOP_MIN to ~%d\n", adcValue - 50);
+                }
+                else if (adcValue > BTN_PLAY_STOP_MAX && adcValue < BTN_MUTE_MIN) {
+                    Serial.printf("  → Adjust: BTN_PLAY_STOP_MAX=%d, BTN_MUTE_MIN=%d\n", 
+                                 adcValue + 100, adcValue - 100);
+                }
+                else if (adcValue > BTN_MUTE_MAX && adcValue < BTN_BACK_MIN) {
+                    Serial.printf("  → Adjust: BTN_MUTE_MAX=%d, BTN_BACK_MIN=%d\n", 
+                                 adcValue + 100, adcValue - 100);
+                }
+                else if (adcValue > BTN_BACK_MAX) {
+                    Serial.printf("  → Raise BTN_BACK_MAX to ~%d\n", adcValue + 100);
+                }
+            }
+            Serial.printf("═══════════════════════════════════\n\n");
+        }
+    }
 }
 
 void handleVolume() {
@@ -1253,10 +1433,19 @@ void drawSequencerScreen() {
         tft.setTextSize(2);
         for (int t = 0; t < MAX_TRACKS; t++) {
             int y = gridY + 2 + t * (cellH + 2);
-            // Usar color único por instrumento, más brillante si está seleccionado
-            tft.setTextColor(getInstrumentColor(t));
-            tft.setCursor(gridX + 4, y + 2);
-            tft.print(trackNames[t]);
+            // Mostrar MUTED con color diferente
+            if (pattern.muted[t]) {
+                tft.setTextColor(COLOR_TEXT_DIM);
+                tft.setCursor(gridX + 4, y + 2);
+                tft.print("M");
+                tft.setCursor(gridX + 14, y + 2);
+                tft.print(trackNames[t]);
+            } else {
+                // Usar color único por instrumento
+                tft.setTextColor(getInstrumentColor(t));
+                tft.setCursor(gridX + 4, y + 2);
+                tft.print(trackNames[t]);
+            }
         }
         
         lastStep = -1;
@@ -1301,7 +1490,7 @@ void drawSequencerScreen() {
         tft.setTextSize(1);
         tft.setTextColor(COLOR_TEXT_DIM);
         tft.setCursor(5, 305);
-        tft.println("S1-S16:TOGGLE | ENCODER:TRACK | BTN:PLAY/STOP | BACK:MENU");
+        tft.println("S1-S16:TOGGLE | ENC:TRACK | PLAY/STOP | MUTE(HOLD:CLEAR) | BACK");
     }
 }
 
