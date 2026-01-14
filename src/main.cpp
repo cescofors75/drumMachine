@@ -945,18 +945,22 @@ void handleMuteButton() {
     static bool lastMutePressed = false;
     static unsigned long muteBtnPressTime = 0;
     static bool holdProcessed = false;
+    static int lastMuteAdcValue = 0;
     unsigned long currentTime = millis();
     
     int adcValue = analogRead(ANALOG_BUTTONS_PIN);
     bool mutePressed = (adcValue >= BTN_MUTE_MIN && adcValue <= BTN_MUTE_MAX);
+    bool noButtonPressed = (adcValue < BTN_NONE_THRESHOLD);
     
     // Detectar presión del botón (flanco de subida)
     if (mutePressed && !lastMutePressed) {
         muteBtnPressTime = currentTime;
         holdProcessed = false;
+        lastMuteAdcValue = adcValue;
+        Serial.printf("► MUTE BUTTON PRESSED (ADC: %d)\n", adcValue);
     }
     
-    // Detectar HOLD (mantener presionado >1 segundo)
+    // Detectar HOLD (mantener presionado >1 segundo) - CLEAR
     if (mutePressed && !holdProcessed && (currentTime - muteBtnPressTime > 1000)) {
         holdProcessed = true;
         Serial.printf("► MUTE BUTTON (HOLD - CLEAR INSTRUMENT) ADC: %d\n", adcValue);
@@ -968,7 +972,7 @@ void handleMuteButton() {
             for (int s = 0; s < MAX_STEPS; s++) {
                 pattern.steps[selectedTrack][s] = false;
             }
-            Serial.printf("   Cleared all steps for Track %d (%s)\n", 
+            Serial.printf("   ✓ Cleared all steps for Track %d (%s)\n", 
                          selectedTrack, trackNames[selectedTrack]);
             
             // Actualizar display
@@ -981,29 +985,34 @@ void handleMuteButton() {
         }
     }
     
-    // Detectar liberación del botón - MUTE
-    if (!mutePressed && lastMutePressed && !holdProcessed && (currentTime - muteBtnPressTime > 50)) {
-        Serial.printf("► MUTE BUTTON (CLICK - TOGGLE MUTE) ADC: %d\n", adcValue);
+    // Detectar liberación del botón - TOGGLE MUTE (solo si fue click corto)
+    if (noButtonPressed && lastMutePressed && !holdProcessed) {
+        unsigned long pressDuration = currentTime - muteBtnPressTime;
         
-        // Solo funciona en SEQUENCER
-        if (currentScreen == SCREEN_SEQUENCER) {
-            // Toggle mute del track seleccionado
-            Pattern& pattern = patterns[currentPattern];
-            pattern.muted[selectedTrack] = !pattern.muted[selectedTrack];
+        // Solo toggle mute si la presión fue corta (<1000ms) y mayor que debounce
+        if (pressDuration > 50 && pressDuration < 1000) {
+            Serial.printf("► MUTE BUTTON (CLICK - TOGGLE MUTE) Duration: %lums\n", pressDuration);
             
-            Serial.printf("   Track %d (%s): %s\n", 
-                         selectedTrack, trackNames[selectedTrack],
-                         pattern.muted[selectedTrack] ? "MUTED" : "UNMUTED");
-            
-            // Feedback visual
-            if (pattern.muted[selectedTrack]) {
-                tm1.displayText("MUTED  ");
-            } else {
-                tm1.displayText("UNMUTED");
+            // Solo funciona en SEQUENCER
+            if (currentScreen == SCREEN_SEQUENCER) {
+                // Toggle mute del track seleccionado
+                Pattern& pattern = patterns[currentPattern];
+                pattern.muted[selectedTrack] = !pattern.muted[selectedTrack];
+                
+                Serial.printf("   ✓ Track %d (%s): %s\n", 
+                             selectedTrack, trackNames[selectedTrack],
+                             pattern.muted[selectedTrack] ? "MUTED" : "UNMUTED");
+                
+                // Feedback visual
+                if (pattern.muted[selectedTrack]) {
+                    tm1.displayText("MUTED  ");
+                } else {
+                    tm1.displayText("UNMUTED");
+                }
+                tm2.displayText(instrumentNames[selectedTrack]);
+                
+                needsFullRedraw = true;
             }
-            tm2.displayText(instrumentNames[selectedTrack]);
-            
-            needsHeaderUpdate = true;
         }
     }
     
@@ -1435,7 +1444,7 @@ void drawSequencerScreen() {
             int y = gridY + 2 + t * (cellH + 2);
             // Mostrar MUTED con color diferente
             if (pattern.muted[t]) {
-                tft.setTextColor(COLOR_TEXT_DIM);
+                tft.setTextColor(COLOR_ERROR);
                 tft.setCursor(gridX + 4, y + 2);
                 tft.print("M");
                 tft.setCursor(gridX + 14, y + 2);
