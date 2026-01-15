@@ -66,18 +66,112 @@
 #define DEFAULT_BPM 120
 #define DEFAULT_VOLUME 15
 
-// TEMA PROFESIONAL AZUL NAVY
-#define COLOR_BG           0x0821
-#define COLOR_NAVY         0x1082
-#define COLOR_NAVY_LIGHT   0x2945
-#define COLOR_ACCENT       0x3D8F
-#define COLOR_ACCENT2      0x04FF
-#define COLOR_TEXT         0xFFFF
-#define COLOR_TEXT_DIM     0xBDF7
-#define COLOR_SUCCESS      0x07E0
-#define COLOR_WARNING      0xFD20
-#define COLOR_ERROR        0xF800
-#define COLOR_BORDER       0x4A49
+// ============================================
+// SISTEMA DE TEMAS VISUALES
+// ============================================
+struct ColorTheme {
+    const char* name;
+    uint16_t bg;
+    uint16_t primary;
+    uint16_t primaryLight;
+    uint16_t accent;
+    uint16_t accent2;
+    uint16_t text;
+    uint16_t textDim;
+    uint16_t success;
+    uint16_t warning;
+    uint16_t error;
+    uint16_t border;
+};
+
+// TEMA 1: RED808 - Rojo Corporativo
+const ColorTheme THEME_RED808 = {
+    "RED808",
+    0x1800,      // BG: Rojo muy oscuro
+    0xC000,      // PRIMARY: Rojo intenso
+    0xE186,      // PRIMARY_LIGHT: Rojo claro
+    0xF800,      // ACCENT: Rojo brillante puro
+    0xFD20,      // ACCENT2: Naranja-rojo
+    0xFFFF,      // TEXT: Blanco
+    0xE73C,      // TEXT_DIM: Gris cálido
+    0x07E0,      // SUCCESS: Verde
+    0xFFE0,      // WARNING: Amarillo
+    0xF800,      // ERROR: Rojo
+    0x9800       // BORDER: Rojo oscuro
+};
+
+// TEMA 2: NAVY - Azul Profesional (original)
+const ColorTheme THEME_NAVY = {
+    "NAVY",
+    0x0821,      // BG: Azul oscuro
+    0x1082,      // PRIMARY: Navy
+    0x2945,      // PRIMARY_LIGHT: Navy claro
+    0x3D8F,      // ACCENT: Azul medio
+    0x04FF,      // ACCENT2: Cian
+    0xFFFF,      // TEXT: Blanco
+    0xBDF7,      // TEXT_DIM: Gris azulado
+    0x07E0,      // SUCCESS: Verde
+    0xFD20,      // WARNING: Naranja
+    0xF800,      // ERROR: Rojo
+    0x4A49       // BORDER: Azul gris
+};
+
+// TEMA 3: CYBERPUNK - Púrpura/Magenta
+const ColorTheme THEME_CYBER = {
+    "CYBER",
+    0x1006,      // BG: Púrpura muy oscuro
+    0x780F,      // PRIMARY: Púrpura intenso
+    0xA817,      // PRIMARY_LIGHT: Púrpura claro
+    0xF81F,      // ACCENT: Magenta brillante
+    0x07FF,      // ACCENT2: Cian eléctrico
+    0xFFFF,      // TEXT: Blanco
+    0xDEFB,      // TEXT_DIM: Gris lavanda
+    0x07E0,      // SUCCESS: Verde neón
+    0xFFE0,      // WARNING: Amarillo
+    0xF81F,      // ERROR: Magenta
+    0x8010       // BORDER: Púrpura medio
+};
+
+// TEMA 4: EMERALD - Verde/Menta
+const ColorTheme THEME_EMERALD = {
+    "EMERALD",
+    0x0420,      // BG: Verde muy oscuro
+    0x0540,      // PRIMARY: Verde bosque
+    0x2E86,      // PRIMARY_LIGHT: Verde medio
+    0x07E0,      // ACCENT: Verde brillante
+    0x07FF,      // ACCENT2: Turquesa
+    0xFFFF,      // TEXT: Blanco
+    0xCE79,      // TEXT_DIM: Gris verdoso
+    0x07E0,      // SUCCESS: Verde
+    0xFFE0,      // WARNING: Amarillo
+    0xF800,      // ERROR: Rojo
+    0x0460       // BORDER: Verde oscuro
+};
+
+// Array de temas disponibles
+const ColorTheme* THEMES[] = {&THEME_RED808, &THEME_NAVY, &THEME_CYBER, &THEME_EMERALD};
+const int THEME_COUNT = 4;
+
+// Tema actual (RED808 por defecto)
+int currentTheme = 0;
+const ColorTheme* activeTheme = &THEME_RED808;
+
+// Macros para acceso rápido a colores del tema activo
+#define COLOR_BG           (activeTheme->bg)
+#define COLOR_PRIMARY      (activeTheme->primary)
+#define COLOR_PRIMARY_LIGHT (activeTheme->primaryLight)
+#define COLOR_ACCENT       (activeTheme->accent)
+#define COLOR_ACCENT2      (activeTheme->accent2)
+#define COLOR_TEXT         (activeTheme->text)
+#define COLOR_TEXT_DIM     (activeTheme->textDim)
+#define COLOR_SUCCESS      (activeTheme->success)
+#define COLOR_WARNING      (activeTheme->warning)
+#define COLOR_ERROR        (activeTheme->error)
+#define COLOR_BORDER       (activeTheme->border)
+
+// Compatibilidad con código anterior
+#define COLOR_NAVY         (activeTheme->primary)
+#define COLOR_NAVY_LIGHT   (activeTheme->primaryLight)
 
 // COLORES VIVOS PARA CADA INSTRUMENTO (8 colores luminosos)
 #define COLOR_INST_KICK    0xF800  // Rojo brillante - Bass Drum
@@ -268,6 +362,8 @@ void debugAnalogButtons();
 void triggerDrum(int track);
 void testButtonsOnBoot();
 void drawBootScreen();
+void drawConsoleBootScreen();
+void drawSpectrumAnimation();
 void drawMainMenu();
 void drawMenuItems(int oldSelection, int newSelection);
 void drawLiveScreen();
@@ -284,6 +380,7 @@ void updateAudioVisualization();
 void changeTempo(int delta);
 void changePattern(int delta);
 void changeKit(int delta);
+void changeTheme(int delta);
 void toggleStep(int track, int step);
 void changeScreen(Screen newScreen);
 void showInstrumentOnTM1638(int track);
@@ -981,76 +1078,34 @@ void setup() {
     analogSetAttenuation(ADC_11db);
     Serial.println("OK");
     
-    drawBootScreen();
+    // Boot estilo consola UNIX
+    drawConsoleBootScreen();
     
     Serial.println("► SD Card Init...");
     setupSDCard();
-    
-    Serial.println("\n╔═══════════════════════════════════╗");
-    Serial.println("║  TESTING 16 BUTTONS (5 SEC)       ║");
-    Serial.println("╚═══════════════════════════════════╝");
-    
-    tft.fillScreen(COLOR_BG);
-    tft.setTextSize(3);
-    tft.setTextColor(COLOR_ACCENT);
-    tft.setCursor(100, 80);
-    tft.println("BUTTON TEST");
-    
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(60, 130);
-    tft.println("Press buttons S1-S16");
-    
-    tm1.displayText("BTN 1-8 ");
-    tm2.displayText("BTN 9-16");
-    
-    testButtonsOnBoot();
     
     setupKits();
     setupPatterns();
     calculateStepInterval();
     
-    // LED animation
+    // Actualizar pantalla de boot con estado de SD
+    // (ya se muestra en drawConsoleBootScreen pero se actualiza después de setupSDCard)
+    
+    // LED test rápido
     for (int i = 0; i < 16; i++) {
         setLED(i, true);
-        delay(50);
+        delay(30);
     }
-    delay(200);
-    setAllLEDs(0x0000);
     delay(100);
-    setAllLEDs(0xFFFF);
-    delay(200);
     setAllLEDs(0x0000);
     
-    // Splash
-    tft.fillScreen(COLOR_BG);
-    tft.setTextSize(6);
-    tft.setTextColor(COLOR_ACCENT);
-    tft.setCursor(140, 90);
-    tft.println("RED808");
-    
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(85, 155);
-    tft.println("PROFESSIONAL DRUM MACHINE");
-    
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(160, 180);
-    tft.println("V5 - 16 STEPS - NO AUDIO");
-    
-    tft.drawFastHLine(80, 200, 320, COLOR_ACCENT2);
-    
-    tft.fillRoundRect(190, 220, 100, 45, 8, COLOR_SUCCESS);
-    tft.setTextSize(3);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(205, 230);
-    tft.println("READY");
+    // Spectrum Analyzer Animation
+    drawSpectrumAnimation();
     
     tm1.displayText("READY   ");
-    tm2.displayText("16 STEP ");
+    tm2.displayText("RED808  ");
     
-    delay(1500);
+    delay(500);
     
     currentScreen = SCREEN_MENU;
     needsFullRedraw = true;
@@ -1218,6 +1273,20 @@ void handleButtons() {
                         ledActive[i] = true;
                         ledOffTime[i] = millis() + 150;
                     }
+                } else if (currentScreen == SCREEN_SETTINGS) {
+                    // S1-S3: Seleccionar Kit (botones 0-2)
+                    if (i >= 0 && i < MAX_KITS) {
+                        changeKit(i - currentKit);
+                        drawSettingsScreen();
+                        Serial.printf("► Kit changed: %s\n", kits[currentKit].name.c_str());
+                    }
+                    // S5-S8: Seleccionar Tema (botones 4-7)
+                    else if (i >= 4 && i < 4 + THEME_COUNT) {
+                        int newTheme = i - 4;
+                        changeTheme(newTheme - currentTheme);
+                        drawSettingsScreen();
+                        Serial.printf("► Theme changed: %s\n", activeTheme->name);
+                    }
                 } else if (currentScreen == SCREEN_SEQUENCER && !isPlaying) {
                     // Toggle step del instrumento seleccionado
                     toggleStep(selectedTrack, i);
@@ -1270,10 +1339,13 @@ void handleEncoder() {
                 }
                 
             } else if (currentScreen == SCREEN_SETTINGS) {
-                // En settings: menos sensible (dividir por 4)
-                int delta = rawDelta / 4;
+                // En settings: ajustar BPM (tempo)
+                int delta = rawDelta / 3;
                 if (delta != 0) {
-                    changeTempo(delta);
+                    changeTempo(delta * 5);  // Cambios de 5 en 5 BPM
+                    needsHeaderUpdate = true;
+                    showBPMOnTM1638();
+                    Serial.printf("► BPM: %d\n", tempo);
                 }
                 
             } else if (currentScreen == SCREEN_SEQUENCER) {
@@ -1515,7 +1587,7 @@ void debugAnalogButtons() {
 
 void handleVolume() {
     int raw = analogRead(ROTARY_ANGLE_PIN);
-    int newVol = map(raw, 0, 4095, 0, 30);
+    int newVol = map(raw, 0, 4095, 30, 0);  // Invertido: girar derecha = subir volumen
     
     if (abs(newVol - lastVolumeLevel) > 1) {
         volumeLevel = newVol;
@@ -1652,24 +1724,264 @@ void updateAudioVisualization() {
 // DRAW FUNCTIONS
 // ============================================
 void drawBootScreen() {
-    tft.fillScreen(COLOR_BG);
+    // Esta función ya no se usa - reemplazada por drawConsoleBootScreen()
+}
+
+void drawConsoleBootScreen() {
+    // Fondo degradado oscuro moderno
+    for (int y = 0; y < 320; y += 2) {
+        uint8_t brightness = map(y, 0, 320, 8, 2);
+        uint16_t color = tft.color565(brightness, 0, 0);
+        tft.drawFastHLine(0, y, 480, color);
+    }
     
-    tft.setTextSize(5);
-    tft.setTextColor(COLOR_ACCENT);
-    tft.setCursor(160, 100);
+    // LOGO PRINCIPAL - Grande y con efecto
+    tft.fillRoundRect(90, 30, 300, 80, 10, THEME_RED808.primary);
+    tft.drawRoundRect(90, 30, 300, 80, 10, THEME_RED808.accent);
+    tft.drawRoundRect(92, 32, 296, 76, 8, THEME_RED808.accent2);
+    
+    tft.setTextSize(6);
+    tft.setTextColor(THEME_RED808.accent);
+    tft.setCursor(125, 50);
     tft.println("RED808");
     
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(125, 155);
-    tft.println("DRUM MACHINE V5");
+    // Líneas decorativas
+    for (int i = 0; i < 3; i++) {
+        tft.drawFastHLine(50, 120 + i, 380, THEME_RED808.accent);
+    }
     
+    delay(400);
+    
+    // TARJETAS DE SISTEMA - Diseño moderno tipo dashboard
+    const int cardY = 140;
+    const int cardH = 50;
+    const int cardW = 140;
+    const int spacing = 10;
+    
+    // Tarjeta 1: CPU
+    int x1 = 20;
+    tft.fillRoundRect(x1, cardY, cardW, cardH, 8, 0x2000);
+    tft.drawRoundRect(x1, cardY, cardW, cardH, 8, THEME_RED808.accent);
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(160, 180);
-    tft.println("16 STEPS / 2x TM1638");
+    tft.setTextColor(THEME_RED808.accent2);
+    tft.setCursor(x1 + 10, cardY + 10);
+    tft.println("ESP32");
+    tft.setTextSize(2);
+    tft.setTextColor(0xFFFF);
+    tft.setCursor(x1 + 10, cardY + 25);
+    tft.println("240MHz");
+    delay(200);
     
-    tft.drawFastHLine(120, 200, 240, COLOR_ACCENT2);
+    // Tarjeta 2: RAM
+    int x2 = x1 + cardW + spacing;
+    tft.fillRoundRect(x2, cardY, cardW, cardH, 8, 0x2000);
+    tft.drawRoundRect(x2, cardY, cardW, cardH, 8, THEME_RED808.accent);
+    tft.setTextSize(1);
+    tft.setTextColor(THEME_RED808.accent2);
+    tft.setCursor(x2 + 10, cardY + 10);
+    tft.println("MEMORY");
+    tft.setTextSize(2);
+    tft.setTextColor(0xFFFF);
+    tft.setCursor(x2 + 10, cardY + 25);
+    tft.println("320KB");
+    delay(200);
+    
+    // Tarjeta 3: DISPLAY
+    int x3 = x2 + cardW + spacing;
+    tft.fillRoundRect(x3, cardY, cardW, cardH, 8, 0x2000);
+    tft.drawRoundRect(x3, cardY, cardW, cardH, 8, THEME_RED808.accent);
+    tft.setTextSize(1);
+    tft.setTextColor(THEME_RED808.accent2);
+    tft.setCursor(x3 + 10, cardY + 10);
+    tft.println("DISPLAY");
+    tft.setTextSize(2);
+    tft.setTextColor(0xFFFF);
+    tft.setCursor(x3 + 10, cardY + 25);
+    tft.println("480x320");
+    delay(200);
+    
+    // BARRA DE PROGRESO MODERNA
+    int progY = 210;
+    tft.setTextSize(1);
+    tft.setTextColor(THEME_RED808.accent2);
+    tft.setCursor(20, progY);
+    tft.println("INITIALIZING SYSTEM...");
+    
+    const int barX = 20;
+    const int barY = progY + 20;
+    const int barW = 440;
+    const int barH = 20;
+    
+    // Fondo de la barra
+    tft.fillRoundRect(barX, barY, barW, barH, 10, 0x1800);
+    tft.drawRoundRect(barX, barY, barW, barH, 10, THEME_RED808.accent);
+    
+    // Animación de carga progresiva
+    const char* stages[] = {
+        "Hardware",
+        "Displays",
+        "TM1638 #1",
+        "TM1638 #2",
+        "Encoder",
+        "Buttons",
+        "SD Card",
+        "Audio Kits",
+        "Patterns",
+        "Sequencer"
+    };
+    
+    for (int i = 0; i < 10; i++) {
+        int progress = map(i + 1, 0, 10, 0, barW - 4);
+        
+        // Barra de progreso con gradiente
+        for (int p = 0; p < progress; p += 2) {
+            uint8_t red = map(p, 0, progress, 200, 255);
+            uint16_t color = tft.color565(red, 0, 0);
+            tft.fillRect(barX + 2 + p, barY + 2, 2, barH - 4, color);
+        }
+        
+        // Texto del stage actual
+        tft.fillRect(20, progY + 45, 200, 16, 0x0000);
+        tft.setTextSize(2);
+        tft.setTextColor(THEME_RED808.accent);
+        tft.setCursor(20, progY + 45);
+        tft.printf("> %s", stages[i]);
+        
+        // Porcentaje
+        tft.fillRect(380, progY + 45, 80, 16, 0x0000);
+        tft.setTextColor(0xFFFF);
+        tft.setCursor(380, progY + 45);
+        tft.printf("%d%%", (i + 1) * 10);
+        
+        delay(180);
+    }
+    
+    delay(200);
+    
+    // MENSAJE FINAL - Grande y centrado
+    tft.fillRect(0, progY + 70, 480, 40, 0x0000);
+    
+    // Caja de "READY"
+    tft.fillRoundRect(140, progY + 70, 200, 45, 10, THEME_RED808.accent);
+    tft.drawRoundRect(140, progY + 70, 200, 45, 10, 0xFFFF);
+    tft.setTextSize(3);
+    tft.setTextColor(0x0000);
+    tft.setCursor(175, progY + 80);
+    tft.println("READY");
+    
+    // Iconos de check
+    for (int i = 0; i < 3; i++) {
+        tft.fillCircle(120 + i * 5, progY + 92, 3, 0x07E0);
+        tft.fillCircle(360 + i * 5, progY + 92, 3, 0x07E0);
+    }
+    
+    delay(800);
+}
+
+void drawSpectrumAnimation() {
+    // Fondo negro con degradado sutil
+    for (int y = 0; y < 320; y += 4) {
+        uint8_t brightness = map(y, 0, 320, 5, 0);
+        uint16_t color = tft.color565(brightness, 0, 0);
+        tft.fillRect(0, y, 480, 4, color);
+    }
+    
+    // LOGO CON EFECTO GLOW
+    // Sombra/glow exterior
+    for (int offset = 4; offset > 0; offset--) {
+        uint8_t brightness = map(offset, 4, 1, 50, 150);
+        uint16_t glowColor = tft.color565(brightness, 0, 0);
+        tft.drawRoundRect(86 - offset, 26 - offset, 308 + offset * 2, 88 + offset * 2, 12, glowColor);
+    }
+    
+    // Caja del logo
+    tft.fillRoundRect(90, 30, 300, 80, 10, 0x1000);
+    tft.drawRoundRect(90, 30, 300, 80, 10, THEME_RED808.accent);
+    tft.drawRoundRect(92, 32, 296, 76, 8, THEME_RED808.accent2);
+    
+    tft.setTextSize(7);
+    tft.setTextColor(THEME_RED808.accent);
+    tft.setCursor(115, 45);
+    tft.println("RED808");
+    
+    // Subtítulo
+    tft.setTextSize(2);
+    tft.setTextColor(THEME_RED808.accent2);
+    tft.setCursor(160, 125);
+    tft.println("DRUM MACHINE");
+    
+    // VISUALIZADOR DE AUDIO MODERNO - Circular
+    const int centerX = 240;
+    const int centerY = 210;
+    const int numBars = 24;
+    const float angleStep = 360.0 / numBars;
+    
+    // Buffer de alturas previas para suavizado
+    static int prevHeights[24] = {0};
+    
+    for (int frame = 0; frame < 25; frame++) {
+        // Borrar área del círculo
+        tft.fillCircle(centerX, centerY, 75, 0x0000);
+        
+        // Dibujar barras radiales
+        for (int i = 0; i < numBars; i++) {
+            float angle = i * angleStep * PI / 180.0;
+            
+            // Altura con onda suave
+            float wave = sin((frame * 0.3) + (i * 0.4)) * 20 + 40;
+            int targetHeight = random(20, 60) * 0.3 + wave * 0.7;
+            
+            // Suavizado
+            prevHeights[i] = (prevHeights[i] * 0.7) + (targetHeight * 0.3);
+            int height = prevHeights[i];
+            
+            // Posición inicial (centro)
+            int startRadius = 15;
+            int endRadius = startRadius + height;
+            
+            // Calcular posiciones
+            int x1 = centerX + cos(angle) * startRadius;
+            int y1 = centerY + sin(angle) * startRadius;
+            int x2 = centerX + cos(angle) * endRadius;
+            int y2 = centerY + sin(angle) * endRadius;
+            
+            // Gradiente de color según altura
+            uint8_t red = map(height, 20, 60, 150, 255);
+            uint16_t color = tft.color565(red, 0, 0);
+            
+            // Dibujar línea gruesa
+            for (int thick = -2; thick <= 2; thick++) {
+                int x1t = x1 + cos(angle + PI/2) * thick;
+                int y1t = y1 + sin(angle + PI/2) * thick;
+                int x2t = x2 + cos(angle + PI/2) * thick;
+                int y2t = y2 + sin(angle + PI/2) * thick;
+                tft.drawLine(x1t, y1t, x2t, y2t, color);
+            }
+            
+            // Punto brillante en el extremo
+            tft.fillCircle(x2, y2, 2, THEME_RED808.accent);
+        }
+        
+        // Círculo central decorativo
+        tft.fillCircle(centerX, centerY, 12, THEME_RED808.primary);
+        tft.drawCircle(centerX, centerY, 12, THEME_RED808.accent);
+        tft.drawCircle(centerX, centerY, 13, THEME_RED808.accent2);
+        
+        // Texto LOADING centrado con parpadeo suave
+        if (frame % 8 < 6) {  // Parpadeo más lento
+            tft.setTextSize(2);
+            tft.setTextColor(THEME_RED808.accent);
+            tft.setCursor(185, 295);
+            tft.println("LOADING...");
+        } else {
+            tft.fillRect(185, 295, 110, 20, 0x0000);
+        }
+        
+        delay(70);  // Animación fluida
+    }
+    
+    // Transición suave final
+    delay(500);
 }
 
 void drawMainMenu() {
@@ -1932,50 +2244,99 @@ void drawSettingsScreen() {
     tft.setCursor(180, 58);
     tft.println("SETTINGS");
     
-    const int sectionY = 88;
+    // ========== COLUMNA IZQUIERDA: DRUM KITS ==========
+    const int leftX = 20;
+    const int sectionY = 95;
     
     tft.setTextSize(2);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(40, sectionY);
+    tft.setCursor(leftX, sectionY);
     tft.println("DRUM KITS");
-    tft.drawFastHLine(40, sectionY + 25, 400, COLOR_BORDER);
+    tft.drawFastHLine(leftX, sectionY + 25, 200, COLOR_BORDER);
     
     for (int i = 0; i < MAX_KITS; i++) {
-        int y = sectionY + 40 + i * 48;
+        int y = sectionY + 40 + i * 45;
         
         if (i == currentKit) {
-            tft.fillRoundRect(30, y, 420, 42, 8, COLOR_ACCENT);
-            tft.drawRoundRect(30, y, 420, 42, 8, COLOR_ACCENT2);
-            tft.setTextSize(3);
+            tft.fillRoundRect(leftX, y, 200, 38, 6, COLOR_ACCENT);
+            tft.drawRoundRect(leftX, y, 200, 38, 6, COLOR_ACCENT2);
+            tft.setTextSize(2);
             tft.setTextColor(COLOR_TEXT);
         } else {
-            tft.fillRoundRect(30, y, 420, 42, 8, COLOR_NAVY_LIGHT);
+            tft.fillRoundRect(leftX, y, 200, 38, 6, COLOR_PRIMARY_LIGHT);
             tft.setTextSize(2);
             tft.setTextColor(COLOR_TEXT_DIM);
         }
         
-        tft.fillCircle(55, y + 21, 12, i == currentKit ? COLOR_ACCENT2 : COLOR_NAVY);
-        tft.setTextSize(2);
+        // Número del kit
+        tft.fillCircle(leftX + 20, y + 19, 10, i == currentKit ? COLOR_ACCENT2 : COLOR_PRIMARY);
+        tft.setTextSize(1);
         tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(50, y + 14);
+        tft.setCursor(leftX + 16, y + 13);
         tft.printf("%d", i + 1);
         
-        tft.setTextSize(i == currentKit ? 3 : 2);
+        // Nombre del kit
+        tft.setTextSize(2);
         tft.setTextColor(i == currentKit ? COLOR_TEXT : COLOR_TEXT_DIM);
-        tft.setCursor(85, y + (i == currentKit ? 10 : 12));
+        tft.setCursor(leftX + 40, y + 11);
         tft.print(kits[i].name.c_str());
-        
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(350, y + 17);
-        tft.printf("/%02d", kits[i].folder);
     }
     
+    // ========== COLUMNA DERECHA: VISUAL THEMES ==========
+    const int rightX = 260;
+    
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(rightX, sectionY);
+    tft.println("THEMES");
+    tft.drawFastHLine(rightX, sectionY + 25, 200, COLOR_BORDER);
+    
+    for (int i = 0; i < THEME_COUNT; i++) {
+        int y = sectionY + 40 + i * 45;
+        const ColorTheme* theme = THEMES[i];
+        
+        if (i == currentTheme) {
+            tft.fillRoundRect(rightX, y, 200, 38, 6, theme->accent);
+            tft.drawRoundRect(rightX, y, 200, 38, 6, theme->accent2);
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_TEXT);
+        } else {
+            tft.fillRoundRect(rightX, y, 200, 38, 6, theme->primary);
+            tft.setTextSize(2);
+            tft.setTextColor(theme->textDim);
+        }
+        
+        // Preview de color (cuadrado con color del tema)
+        tft.fillRoundRect(rightX + 10, y + 9, 20, 20, 3, theme->accent);
+        tft.drawRoundRect(rightX + 10, y + 9, 20, 20, 3, theme->accent2);
+        
+        // Nombre del tema
+        tft.setTextSize(2);
+        tft.setTextColor(i == currentTheme ? COLOR_TEXT : theme->text);
+        tft.setCursor(rightX + 40, y + 11);
+        tft.print(theme->name);
+    }
+    
+    // Footer con instrucciones
+    tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(120, 305);
-    tft.println("ENCODER: CHANGE KIT  |  BACK: MENU");
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(20, 305);
+    tft.print("S1-S3: KIT");
+    tft.setCursor(110, 305);
+    tft.print("|");
+    tft.setCursor(125, 305);
+    tft.print("S5-S8: THEME");
+    tft.setCursor(235, 305);
+    tft.print("|");
+    tft.setCursor(250, 305);
+    tft.print("ENCODER: BPM");
+    tft.setCursor(360, 305);
+    tft.print("|");
+    tft.setCursor(375, 305);
+    tft.print("BACK: MENU");
 }
+
 
 void drawDiagnosticsScreen() {
     tft.fillScreen(COLOR_BG);
@@ -2128,6 +2489,20 @@ void changePattern(int delta) {
 void changeKit(int delta) {
     currentKit = (currentKit + delta + MAX_KITS) % MAX_KITS;
     needsFullRedraw = true;
+}
+
+void changeTheme(int delta) {
+    currentTheme = (currentTheme + delta + THEME_COUNT) % THEME_COUNT;
+    activeTheme = THEMES[currentTheme];
+    needsFullRedraw = true;
+    
+    // Actualizar TM1638 con nombre del tema
+    char display[9];
+    snprintf(display, 9, "%-8s", activeTheme->name);
+    tm1.displayText(display);
+    tm2.displayText(display);
+    
+    Serial.printf("► Theme changed to: %s\n", activeTheme->name);
 }
 
 void changeScreen(Screen newScreen) {
