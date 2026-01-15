@@ -16,7 +16,7 @@
 #define TFT_MOSI 23
 #define TFT_SCK  18
 #define TFT_MISO 19
-#define TFT_BL   21
+//#define TFT_BL   -1
 
 // TM1638 Module 1 (Steps 1-8)
 #define TM1638_1_STB 33
@@ -50,9 +50,9 @@
 
 // SD Card Reader (6 pins SPI)
 #define SD_CS   15
-//#define SD_MOSI 23
-//#define SD_MISO 19
-//#define SD_SCK  18
+#define SD_MOSI 23
+#define SD_MISO 19
+#define SD_SCK  18
 
 // ============================================
 // CONSTANTS
@@ -373,7 +373,7 @@ void setupPatterns() {
 void calculateStepInterval() {
     stepInterval = (60000 / tempo) / 4;
 }
-
+/*
 void setupSDCard() {
     tft.fillScreen(COLOR_BG);
     tft.setTextSize(2);
@@ -381,9 +381,117 @@ void setupSDCard() {
     tft.setCursor(120, 130);
     tft.println("Checking SD Card...");
     
-    SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, SD_CS);
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║  SD CARD INITIALIZATION                    ║");
+    Serial.println("╚════════════════════════════════════════════╝");
+    Serial.println("Pin Configuration:");
+    Serial.printf("  CS   = Pin %d\n", SD_CS);
+    Serial.printf("  MOSI = Pin %d\n", SD_MOSI);
+    Serial.printf("  MISO = Pin %d\n", SD_MISO);
+    Serial.printf("  SCK  = Pin %d\n", SD_SCK);
     
-    if (SD.begin(SD_CS)) {
+    // Asegurar que TFT_CS está en HIGH para no interferir
+    pinMode(TFT_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
+    
+    // Configurar CS como OUTPUT y ponerlo en HIGH antes de inicializar
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    delay(100);
+    
+    // Test de conectividad MISO
+    Serial.println("\nTesting MISO line...");
+    pinMode(SD_MISO, INPUT_PULLUP);
+    int misoState = digitalRead(SD_MISO);
+    Serial.printf("  MISO state: %s\n", misoState ? "HIGH (OK)" : "LOW (check connection)");
+    
+    // Test de conectividad CS
+    Serial.println("\nTesting CS line...");
+    digitalWrite(SD_CS, LOW);
+    delay(10);
+    digitalWrite(SD_CS, HIGH);
+    Serial.println("  CS toggle: OK");
+    
+    // Enviar 80 pulsos de reloj con CS alto para resetear la SD (protocolo SPI SD)
+    Serial.println("\nSending SD reset sequence...");
+    digitalWrite(SD_CS, HIGH);
+    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    for (int i = 0; i < 10; i++) {
+        SPI.transfer(0xFF);  // 10 bytes = 80 bits de reloj
+    }
+    SPI.endTransaction();
+    delay(100);
+    Serial.println("  Reset sequence sent");
+    
+    // Intentar varias configuraciones comunes
+    bool sdOk = false;
+    
+    // Intento 1: Frecuencia muy baja (250kHz - modo ultra seguro)
+    Serial.println("\n[1] Trying 250kHz (ultra safe mode)...");
+    digitalWrite(TFT_CS, HIGH);  // TFT desactivado
+    
+    if (SD.begin(SD_CS, SPI, 250000)) {
+        sdOk = true;
+        Serial.println("  ✓ SUCCESS with 250kHz");
+    } else {
+        Serial.println("  ✗ Failed");
+    }
+    
+    // Intento 2: 1MHz
+    if (!sdOk) {
+        Serial.println("[2] Trying 1MHz...");
+        SD.end();
+        delay(100);
+        if (SD.begin(SD_CS, SPI, 1000000)) {
+            sdOk = true;
+            Serial.println("  ✓ SUCCESS with 1MHz");
+        } else {
+            Serial.println("  ✗ Failed");
+        }
+    }
+    
+    // Intento 3: 4MHz
+    if (!sdOk) {
+        Serial.println("[3] Trying 4MHz...");
+        SD.end();
+        delay(100);
+        if (SD.begin(SD_CS, SPI, 4000000)) {
+            sdOk = true;
+            Serial.println("  ✓ SUCCESS with 4MHz");
+        } else {
+            Serial.println("  ✗ Failed");
+        }
+    }
+    
+    // Intento 4: Sin especificar frecuencia
+    if (!sdOk) {
+        Serial.println("[4] Trying default frequency...");
+        SD.end();
+        delay(100);
+        if (SD.begin(SD_CS)) {
+            sdOk = true;
+            Serial.println("  ✓ SUCCESS with default");
+        } else {
+            Serial.println("  ✗ Failed");
+        }
+    }
+    
+    // Intento 5: Reiniciar SPI manualmente
+    if (!sdOk) {
+        Serial.println("[5] Trying manual SPI restart...");
+        SPI.end();
+        delay(100);
+        SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
+        delay(100);
+        if (SD.begin(SD_CS, SPI, 400000)) {
+            sdOk = true;
+            Serial.println("  ✓ SUCCESS with manual SPI");
+        } else {
+            Serial.println("  ✗ Failed");
+        }
+    }
+    
+    if (sdOk) {
         diagnostic.sdCardOk = true;
         
         uint64_t cardSize = SD.cardSize() / (1024 * 1024);
@@ -415,7 +523,14 @@ void setupSDCard() {
     } else {
         diagnostic.sdCardOk = false;
         diagnostic.lastError = "SD Card failed";
-        Serial.println("  ✗ SD Card FAILED!");
+        Serial.println("\n✗✗✗ ALL METHODS FAILED ✗✗✗");
+        Serial.println("\nPossible issues:");
+        Serial.println("  1. SD card not inserted or not making contact");
+        Serial.println("  2. SD card corrupted or wrong format (use FAT32)");
+        Serial.println("  3. Wiring issue - check all 6 connections");
+        Serial.println("  4. Power issue - SD needs stable 3.3V");
+        Serial.println("  5. Wrong SD module type");
+        Serial.println("\nContinuing without SD card...");
         
         tft.setTextColor(COLOR_WARNING);
         tft.setCursor(120, 160);
@@ -423,6 +538,302 @@ void setupSDCard() {
     }
     
     delay(1000);
+}
+
+void setupSDCard() {
+    tft.fillScreen(COLOR_BG);
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(120, 130);
+    tft.println("Checking SD Card...");
+    
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║  SD CARD INITIALIZATION                    ║");
+    Serial.println("╚════════════════════════════════════════════╝");
+    Serial.println("Pin Configuration:");
+    Serial.printf("  CS   = Pin %d\n", SD_CS);
+    Serial.printf("  MOSI = Pin %d\n", SD_MOSI);
+    Serial.printf("  MISO = Pin %d\n", SD_MISO);
+    Serial.printf("  SCK  = Pin %d\n", SD_SCK);
+    
+    // CRÍTICO: Desactivar TODOS los dispositivos SPI antes de inicializar SD
+    pinMode(TFT_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    
+    delay(100);
+    
+    // Secuencia de reset de la SD card (muy importante)
+    Serial.println("\nSending SD reset sequence...");
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1); // Inicializar SPI explícitamente
+    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    digitalWrite(SD_CS, HIGH);
+    for (int i = 0; i < 10; i++) {
+        SPI.transfer(0xFF);
+    }
+    SPI.endTransaction();
+    delay(100);
+    
+    // MÉTODO CORRECTO: Pasar SPI como segundo parámetro
+    bool sdOk = false;
+    
+    // Intento 1: Con SPI explícito y frecuencia muy baja (400kHz)
+    Serial.println("\n[1] Trying 400kHz with explicit SPI...");
+    digitalWrite(TFT_CS, HIGH); // TFT desactivado
+    digitalWrite(SD_CS, HIGH);  // SD desactivado
+    delay(10);
+    
+    // IMPORTANTE: SD.begin(CS_PIN, SPI_OBJECT, FREQUENCY, MOUNT_POINT, MAX_FILES)
+    if (SD.begin(SD_CS, SPI, 400000, "/sd", 5)) {
+        sdOk = true;
+        Serial.println("  ✓ SUCCESS with 400kHz");
+    }
+    
+    if (!sdOk) {
+        Serial.println("[2] Trying 250kHz...");
+        SD.end();
+        delay(200);
+        if (SD.begin(SD_CS, SPI, 250000, "/sd", 5)) {
+            sdOk = true;
+            Serial.println("  ✓ SUCCESS with 250kHz");
+        }
+    }
+    
+    if (!sdOk) {
+        Serial.println("[3] Trying with SD_MMC mode (alternative)...");
+        // Nota: Esto solo funciona si tu módulo soporta modo MMC
+    }
+    
+    if (sdOk) {
+        diagnostic.sdCardOk = true;
+        
+        uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+        uint8_t cardType = SD.cardType();
+        
+        Serial.printf("  ✓ SD Card Type: ");
+        switch(cardType) {
+            case CARD_MMC: Serial.println("MMC"); break;
+            case CARD_SD: Serial.println("SDSC"); break;
+            case CARD_SDHC: Serial.println("SDHC"); break;
+            default: Serial.println("UNKNOWN"); break;
+        }
+        
+        Serial.printf("  ✓ SD Card Size: %lluMB\n", cardSize);
+        
+        // Contar archivos
+        int totalFiles = 0;
+        for (int kit = 1; kit <= 3; kit++) {
+            char path[10];
+            snprintf(path, 10, "/sd/%02d", kit); // IMPORTANTE: Agregar /sd/ al path
+            File dir = SD.open(path);
+            if (dir && dir.isDirectory()) {
+                File file = dir.openNextFile();
+                while (file) {
+                    if (!file.isDirectory()) {
+                        totalFiles++;
+                        Serial.printf("    Found: %s\n", file.name());
+                    }
+                    file = dir.openNextFile();
+                }
+                dir.close();
+            } else {
+                Serial.printf("  ! Folder %s not found\n", path);
+            }
+        }
+        
+        diagnostic.filesFound = totalFiles;
+        Serial.printf("  ✓ Total sound files: %d\n", totalFiles);
+        
+        // Mostrar en pantalla
+        digitalWrite(TFT_CS, LOW); // Reactivar TFT
+        delay(10);
+        tft.setTextColor(COLOR_SUCCESS);
+        tft.setCursor(120, 160);
+        tft.printf("SD: %lluMB - %d files", cardSize, totalFiles);
+        digitalWrite(TFT_CS, HIGH);
+        
+    } else {
+        diagnostic.sdCardOk = false;
+        diagnostic.lastError = "SD Card failed";
+        
+        Serial.println("\n✗✗✗ ALL METHODS FAILED ✗✗✗");
+        Serial.println("\nDIAGNOSTIC CHECKLIST:");
+        Serial.println("  [1] SD card inserted correctly?");
+        Serial.println("  [2] SD formatted as FAT32?");
+        Serial.println("  [3] Check wiring:");
+        Serial.println("      - CS  -> Pin 15");
+        Serial.println("      - SCK -> Pin 18 (shared)");
+        Serial.println("      - MOSI-> Pin 23 (shared)");
+        Serial.println("      - MISO-> Pin 19 (shared)");
+        Serial.println("      - VCC -> 5V");
+        Serial.println("      - GND -> GND");
+        Serial.println("  [4] Try different SD card (some cards are incompatible)");
+        Serial.println("  [5] Check SD module has voltage regulator (3.3V/5V)");
+        
+        digitalWrite(TFT_CS, LOW);
+        delay(10);
+        tft.setTextColor(COLOR_WARNING);
+        tft.setCursor(120, 160);
+        tft.println("SD Card ERROR!");
+        digitalWrite(TFT_CS, HIGH);
+    }
+    
+    delay(2000);
+}  */
+
+void setupSDCard() {
+    tft.fillScreen(COLOR_BG);
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(120, 130);
+    tft.println("Checking SD Card...");
+    
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║  SD CARD INITIALIZATION                    ║");
+    Serial.println("╚════════════════════════════════════════════╝");
+    Serial.println("Pin Configuration:");
+    Serial.printf("  CS   = Pin %d (GPIO 14)\n", SD_CS);
+    Serial.printf("  MOSI = Pin %d (shared)\n", SD_MOSI);
+    Serial.printf("  MISO = Pin %d (shared)\n", SD_MISO);
+    Serial.printf("  SCK  = Pin %d (shared)\n", SD_SCK);
+    
+    // CRÍTICO: Todos los CS en HIGH antes de inicializar
+    pinMode(TFT_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    
+    delay(100);
+    
+    Serial.println("\nInitializing SD card...");
+    
+    // MÉTODO SIMPLE (funciona en ESP32)
+    if (!SD.begin(SD_CS)) {
+        Serial.println("✗ Card Mount Failed");
+        diagnostic.sdCardOk = false;
+        diagnostic.lastError = "SD Mount Failed";
+        
+        tft.setTextColor(COLOR_ERROR);
+        tft.setCursor(100, 160);
+        tft.println("SD MOUNT FAILED!");
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(80, 185);
+        tft.println("Check: Card inserted? Formatted FAT32?");
+        tft.setCursor(80, 200);
+        tft.printf("CS connected to GPIO %d?", SD_CS);
+        
+        delay(3000);
+        return;
+    }
+    
+    uint8_t cardType = SD.cardType();
+    
+    if (cardType == CARD_NONE) {
+        Serial.println("✗ No SD card attached");
+        diagnostic.sdCardOk = false;
+        diagnostic.lastError = "No SD card";
+        
+        tft.setTextColor(COLOR_WARNING);
+        tft.setCursor(120, 160);
+        tft.println("NO SD CARD!");
+        delay(2000);
+        return;
+    }
+    
+    // ✓ SUCCESS!
+    diagnostic.sdCardOk = true;
+    
+    Serial.print("✓ SD Card Type: ");
+    switch(cardType) {
+        case CARD_MMC: Serial.println("MMC"); break;
+        case CARD_SD: Serial.println("SDSC"); break;
+        case CARD_SDHC: Serial.println("SDHC"); break;
+        default: Serial.println("UNKNOWN");
+    }
+    
+    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    Serial.printf("✓ SD Card Size: %lluMB\n", cardSize);
+    
+    // Contar archivos
+    int totalFiles = 0;
+    Serial.println("\nScanning folders:");
+    
+    for (int kit = 1; kit <= 3; kit++) {
+        char path[10];
+        snprintf(path, 10, "/%02d", kit);
+        
+        File dir = SD.open(path);
+        if (!dir) {
+            Serial.printf("  Creating folder %s\n", path);
+            SD.mkdir(path);
+            continue;
+        }
+        
+        if (dir.isDirectory()) {
+            Serial.printf("  %s/: ", path);
+            int count = 0;
+            File file = dir.openNextFile();
+            while (file) {
+                if (!file.isDirectory()) {
+                    count++;
+                    totalFiles++;
+                }
+                file.close();
+                file = dir.openNextFile();
+            }
+            Serial.printf("%d files\n", count);
+        }
+        dir.close();
+    }
+    
+    diagnostic.filesFound = totalFiles;
+    Serial.printf("\n✓ Total: %d sound files\n", totalFiles);
+    
+    // Mostrar en pantalla
+    tft.setTextColor(COLOR_SUCCESS);
+    tft.setCursor(110, 160);
+    tft.printf("SD: %lluMB", cardSize);
+    tft.setCursor(110, 185);
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.printf("%d sound files ready", totalFiles);
+    
+    delay(1500);
+}
+
+void testSDWiring() {
+    Serial.println("\n═══ SD WIRING TEST ═══");
+    
+    pinMode(SD_CS, OUTPUT);
+    pinMode(SD_MISO, INPUT);
+    
+    // Test 1: CS toggle
+    Serial.print("CS toggle test: ");
+    digitalWrite(SD_CS, HIGH);
+    delay(10);
+    digitalWrite(SD_CS, LOW);
+    delay(10);
+    digitalWrite(SD_CS, HIGH);
+    Serial.println("OK");
+    
+    // Test 2: MISO pullup
+    Serial.print("MISO state (should be HIGH): ");
+    pinMode(SD_MISO, INPUT_PULLUP);
+    delay(10);
+    int misoState = digitalRead(SD_MISO);
+    Serial.println(misoState ? "OK (HIGH)" : "FAIL (LOW - check wiring!)");
+    
+    // Test 3: SPI communication test
+    Serial.print("SPI communication test: ");
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
+    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    digitalWrite(SD_CS, LOW);
+    uint8_t response = SPI.transfer(0xFF);
+    digitalWrite(SD_CS, HIGH);
+    SPI.endTransaction();
+    Serial.printf("Response: 0x%02X %s\n", response, 
+                  (response != 0xFF && response != 0x00) ? "(OK)" : "(Check connection)");
 }
 
 void testButtonsOnBoot() {
@@ -482,7 +893,16 @@ void setup() {
     Serial.println("║   2x TM1638 + SD Card              ║");
     Serial.println("║   NO AUDIO (Visual Only)           ║");
     Serial.println("╚════════════════════════════════════╝\n");
+     Serial.println("► SD Wiring Test...");
+
+     // ⚠️ ESTABLECER TODOS LOS CS EN HIGH PRIMERO
+    pinMode(TFT_CS, OUTPUT);
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
+    digitalWrite(SD_CS, HIGH);
     
+    delay(100);
+    //testSDWiring(); // AGREGAR ESTO
     // TFT Init
     Serial.print("► TFT Init... ");
     tft.init();
