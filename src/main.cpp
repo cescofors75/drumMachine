@@ -1321,8 +1321,14 @@ void sendCommandFast(byte cmd, byte param1, byte param2) {
     buffer[7] = (checksum >> 8) & 0xFF;
     buffer[8] = checksum & 0xFF;
     
-    // Enviar sin esperar - MÁXIMA VELOCIDAD
+    // Limpiar buffer de entrada
+    while(dfplayerSerial.available()) {
+        dfplayerSerial.read();
+    }
+    
+    // Enviar con micro delay para evitar clicks
     dfplayerSerial.write(buffer, 10);
+    delayMicroseconds(1000);  // 1ms para que el DFPlayer procese limpio
 }
 
 void sendCommand(byte cmd, byte param1, byte param2) {
@@ -1413,10 +1419,22 @@ void playSample(int sampleNum) {
         return;
     }
     
+    static int lastSample = -1;
+    static unsigned long lastSampleTime = 0;
+    unsigned long currentTime = millis();
+    
+    // Si es el mismo sample y pasó menos de 80ms, ignorar para evitar clicks
+    if (sampleNum == lastSample && (currentTime - lastSampleTime) < 80) {
+        return;
+    }
+    
     int fileNum = sampleNum + 1;  // 0->1, 1->2, etc.
     
-    // Reproducir desde carpeta /01/ - SIN DELAY
+    // Reproducir desde carpeta /01/
     playFromFolder(1, fileNum);
+    
+    lastSample = sampleNum;
+    lastSampleTime = currentTime;
     
     // Actualizar estado
     samples[sampleNum].isPlaying = true;
