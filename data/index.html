@@ -71,22 +71,8 @@
                         <button class="transport-btn stop-btn" id="transportStop" title="Stop">
                             <svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
                         </button>
-                        <button class="transport-btn play-btn" id="transportPlay" title="Play">
+                        <button class="transport-btn play-btn" id="transportPlay" title="Play/Pause">
                             <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                        </button>
-                        <button class="transport-btn rec-btn" id="transportRec" title="Record">
-                            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg>
-                        </button>
-                    </div>
-                    
-                    <div class="divider"></div>
-                    
-                    <div class="transport-controls">
-                        <button class="transport-btn option-btn" id="transportLoop" title="Loop">
-                            <svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
-                        </button>
-                        <button class="transport-btn option-btn" id="transportHold" title="Hold">
-                            <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
                         </button>
                     </div>
                     
@@ -177,20 +163,41 @@
                     <div class="pads-container">
                         <div class="pads-header">
                             <h2>Live Performance Pads</h2>
-                            <div class="kit-selector-inline">
-                                <label>Kit:</label>
-                                <select id="kitSelectorPads" class="select-control">
-                                    <option value="0">808 Classic</option>
-                                    <option value="1">Elektro</option>
-                                    <option value="2">House</option>
-                                </select>
+                            <div class="pads-controls">
+                                <div class="kit-selector-inline">
+                                    <label>Kit:</label>
+                                    <select id="kitSelectorPads" class="select-control">
+                                        <option value="0">808 Classic</option>
+                                        <option value="1">Elektro</option>
+                                        <option value="2">House</option>
+                                    </select>
+                                </div>
+                                <button class="option-btn" id="padLoopBtn" title="Loop Mode">
+                                    <svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+                                    <span>Loop</span>
+                                </button>
+                                <button class="option-btn" id="padHoldBtn" title="Hold Mode">
+                                    <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
+                                    <span>Hold</span>
+                                </button>
                             </div>
                         </div>
                         <div class="pads-grid" id="padsGrid">
                             <!-- 8 pads -->
                         </div>
-                        <div class="pads-info">
-                            <p>Tap pads to trigger samples. Hold for sustained sounds.</p>
+                        <div class="pads-legend">
+                            <div class="legend-item">
+                                <span class="legend-icon">🎹</span>
+                                <span class="legend-text">Usa las teclas <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd> <kbd>6</kbd> <kbd>7</kbd> <kbd>8</kbd> para tocar los pads</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-icon">🔄</span>
+                                <span class="legend-text">Loop: Reproduce samples en bucle continuo</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-icon">⏸</span>
+                                <span class="legend-text">Hold: Mantiene el sonido mientras mantienes presionado</span>
+                            </div>
                         </div>
                     </div>
                 </div>

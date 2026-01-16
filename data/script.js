@@ -32,10 +32,11 @@ document.addEventListener('DOMContentLoaded', () => {
     
     console.log('RED808 Professional Interface - Loaded');
     
-    // Cargar patrón inicial del ESP32
+    // Cargar estado inicial del ESP32
     setTimeout(() => {
-        fetchPatternData();
-    }, 800);
+        fetchStatus(); // Cargar BPM, volumen, etc
+        fetchPatternData(); // Cargar patrón
+    }, 500);
 });
 
 function initializePatterns() {
@@ -237,7 +238,6 @@ function attachEventListeners() {
     // Transport controls
     const btnPlay = document.getElementById('transportPlay');
     const btnStop = document.getElementById('transportStop');
-    const btnRec = document.getElementById('transportRec');
     
     if (btnPlay) btnPlay.addEventListener('click', () => {
         sendCommand('/play');
@@ -246,26 +246,6 @@ function attachEventListeners() {
     if (btnStop) btnStop.addEventListener('click', () => {
         sendCommand('/stop');
         console.log('Stop clicked');
-    });
-    if (btnRec) btnRec.addEventListener('click', () => {
-        alert('Record mode - Coming soon');
-    });
-    
-    // Loop y Hold controls
-    const btnLoop = document.getElementById('transportLoop');
-    const btnHold = document.getElementById('transportHold');
-    
-    if (btnLoop) btnLoop.addEventListener('click', () => {
-        btnLoop.classList.toggle('active');
-        const enabled = btnLoop.classList.contains('active');
-        sendCommand('/loop', { enabled: enabled ? 1 : 0 });
-        console.log('Loop:', enabled);
-    });
-    if (btnHold) btnHold.addEventListener('click', () => {
-        btnHold.classList.toggle('active');
-        const enabled = btnHold.classList.contains('active');
-        sendCommand('/hold', { enabled: enabled ? 1 : 0 });
-        console.log('Hold:', enabled);
     });
     
     // Tempo controls
@@ -326,6 +306,39 @@ function attachEventListeners() {
     
     if (btnCopyPattern) btnCopyPattern.addEventListener('click', () => copyPattern());
     if (btnClearPattern) btnClearPattern.addEventListener('click', () => clearPattern());
+    
+    // Live Pads controls
+    const padLoopBtn = document.getElementById('padLoopBtn');
+    const padHoldBtn = document.getElementById('padHoldBtn');
+    
+    if (padLoopBtn) padLoopBtn.addEventListener('click', () => {
+        padLoopBtn.classList.toggle('active');
+        const enabled = padLoopBtn.classList.contains('active');
+        sendCommand('/loop', { enabled: enabled ? 1 : 0 });
+        console.log('Pad Loop:', enabled);
+    });
+    
+    if (padHoldBtn) padHoldBtn.addEventListener('click', () => {
+        padHoldBtn.classList.toggle('active');
+        const enabled = padHoldBtn.classList.contains('active');
+        sendCommand('/hold', { enabled: enabled ? 1 : 0 });
+        console.log('Pad Hold:', enabled);
+    });
+    
+    // Keyboard shortcuts para Live Pads (teclas 1-8)
+    document.addEventListener('keydown', (e) => {
+        // Solo activar si no estamos escribiendo en un input
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+            return;
+        }
+        
+        const key = e.key;
+        if (key >= '1' && key <= '8') {
+            const track = parseInt(key) - 1;
+            triggerSample(track);
+            e.preventDefault(); // Prevenir acción por defecto
+        }
+    });
     
     console.log('Event listeners attached');
 }
