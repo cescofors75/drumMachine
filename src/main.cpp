@@ -38,12 +38,12 @@
 #define ANALOG_BUTTONS_PIN 34  // Pin analógico para leer los 3 botones
 
 // Rangos de valores ADC para cada botón (CALIBRADOS según medición real)
-#define BTN_PLAY_STOP_MIN  350   // Botón 1: Play/Stop (medido: 432)
-#define BTN_PLAY_STOP_MAX  650
-#define BTN_MUTE_MIN       1050  // Botón 2: Mute/Clear (medido: 1178)
-#define BTN_MUTE_MAX       1350
-#define BTN_BACK_MIN       1400  // Botón 3: Back (medido: 1460-1523)
-#define BTN_BACK_MAX       1700
+#define BTN_PLAY_STOP_MIN  350   // Botón 1: Play/Stop (medido: 432-656)
+#define BTN_PLAY_STOP_MAX  750
+#define BTN_MUTE_MIN       1450  // Botón 2: Mute/Clear (medido: 1500-1550)
+#define BTN_MUTE_MAX       1600
+#define BTN_BACK_MIN       2250  // Botón 3: Back (medido: 2316-2376)
+#define BTN_BACK_MAX       2450
 #define BTN_NONE_THRESHOLD 300   // Sin botón presionado
 
 // Rotary Angle Potentiometer (3 pins)
@@ -199,7 +199,8 @@ enum Screen {
     SCREEN_LIVE,
     SCREEN_SEQUENCER,
     SCREEN_SETTINGS,
-    SCREEN_DIAGNOSTICS
+    SCREEN_DIAGNOSTICS,
+    SCREEN_CREDITS
 };
 
 enum DisplayMode {
@@ -423,6 +424,7 @@ void debugAnalogButtons();
 void triggerDrum(int track);
 void testButtonsOnBoot();
 void setupDFPlayer();
+void playBootJingle();
 void testAllSamples();
 void playSample(int sampleNum);
 void stopAllSamples();
@@ -439,6 +441,7 @@ void drawLiveScreen();
 void drawSequencerScreen();
 void drawSettingsScreen();
 void drawDiagnosticsScreen();
+void drawCreditsScreen();
 void drawHeader();
 void drawVUMeters();
 void updateTM1638Displays();
@@ -1238,7 +1241,7 @@ void loop() {
         lastVolumeRead = currentTime;
     }
     
-    if (isPlaying && currentScreen == SCREEN_SEQUENCER) {
+    if (isPlaying) {
         updateSequencer();
     }
     
@@ -1260,6 +1263,9 @@ void loop() {
                 break;
             case SCREEN_DIAGNOSTICS:
                 drawDiagnosticsScreen();
+                break;
+            case SCREEN_CREDITS:
+                drawCreditsScreen();
                 break;
             default:
                 break;
@@ -1452,6 +1458,29 @@ void playSample(int sampleNum) {
     tm1.displayText(display);
     snprintf(display, 9, "%s", samples[sampleNum].mode == SAMPLER_LOOP ? "LOOP    " : "ONESHOT ");
     tm2.displayText(display);
+}
+
+void playBootJingle() {
+    // Jingle de arranque: patrón rítmico estilo 808 simple
+    if (!samplerInitialized) return;
+    
+    // Secuencia más simple y robusta: Kick-Snare-Kick-Snare
+    int sequence[] = {0, 1, 0, 1};  // Kick, Snare, Kick, Snare
+    int durations[] = {300, 300, 300, 400};
+    
+    for (int i = 0; i < 4; i++) {
+        // Enviar comando de reproducción
+        sendCommandFast(0x0F, 0x01, sequence[i] + 1);
+        
+        // Actualizar LEDs para feedback visual
+        setLED(sequence[i], true);
+        delay(durations[i]);
+        setLED(sequence[i], false);
+        delay(50);  // Pequeña pausa entre samples
+    }
+    
+    delay(200);  // Pausa final
+    setAllLEDs(0x0000);
 }
 
 void stopAllSamples() {
@@ -1676,13 +1705,11 @@ void handleButtons() {
                     changeTheme(newTheme - currentTheme);
                     drawSettingsScreen();
                 }
-            } else if (currentScreen == SCREEN_SEQUENCER && !isPlaying) {
+            } else if (currentScreen == SCREEN_SEQUENCER) {
+                // Permitir edición en tiempo real incluso en play
                 toggleStep(selectedTrack, i);
                 updateStepLEDsForTrack(selectedTrack);
-                bool wasFullRedraw = needsFullRedraw;
-                needsFullRedraw = true;
-                drawSequencerScreen();
-                needsFullRedraw = wasFullRedraw;
+                needsGridUpdate = true;  // Solo actualizar grid, no full redraw
             }
         }
     }
@@ -1711,6 +1738,21 @@ void handleButtons() {
 }
 
 void handleEncoder() {
+    static bool encoderBtnHeld = false;
+    static unsigned long encoderBtnPressTime = 0;
+    bool btn = digitalRead(ENCODER_SW);
+    unsigned long currentTime = millis();
+    
+    // Detectar si el botón del encoder está presionado (hold para BPM)
+    if (btn == LOW && !encoderBtnHeld) {
+        encoderBtnHeld = true;
+        encoderBtnPressTime = currentTime;
+    } else if (btn == HIGH) {
+        encoderBtnHeld = false;
+    }
+    
+    bool isHolding = encoderBtnHeld && (currentTime - encoderBtnPressTime > 300);
+    
     // Manejar rotación del encoder
     if (encoderChanged) {
         encoderChanged = false;
@@ -1720,7 +1762,25 @@ void handleEncoder() {
         if (rawDelta != 0) {
             lastEncoderPos = currentPos;
             
-            if (currentScreen == SCREEN_MENU) {
+            // Si está en hold: ajustar BPM en cualquier pantalla
+            if (isHolding) {
+                int delta = rawDelta / 2;
+                if (delta != 0) {
+                    tempo = constrain(tempo + delta * 5, MIN_BPM, MAX_BPM);
+                    calculateStepInterval();
+                    needsHeaderUpdate = true;
+                    
+                    // Mostrar en TM1638
+                    char display1[9];
+                    snprintf(display1, 9, "BPM %3d ", tempo);
+                    tm1.displayText(display1);
+                    tm2.displayText("        ");
+                    
+                    Serial.printf("► BPM: %d (Encoder Hold)\n", tempo);
+                }
+            }
+            // Modo normal según pantalla
+            else if (currentScreen == SCREEN_MENU) {
                 // En menú: sensibilidad media (dividir por 2)
                 int delta = rawDelta / 2;
                 if (delta != 0) {
@@ -1769,16 +1829,17 @@ void handleEncoder() {
         }
     }
     
-    // Manejar botón del encoder (solo click corto)
+    // Manejar botón del encoder (solo click corto, no hold)
     static bool lastBtn = HIGH;
     static unsigned long lastBtnTime = 0;
-    bool btn = digitalRead(ENCODER_SW);
-    unsigned long currentTime = millis();
     
-    // Detectar flanco de subida (cuando se suelta el botón) con debounce
-    if (btn == HIGH && lastBtn == LOW && (currentTime - lastBtnTime > 50)) {
-        lastBtnTime = currentTime;
-        Serial.println("► ENCODER BTN (ENTER)");
+    // Detectar click corto (liberación rápida)
+    if (btn == HIGH && lastBtn == LOW) {
+        unsigned long pressDuration = currentTime - encoderBtnPressTime;
+        
+        if (pressDuration < 300 && (currentTime - lastBtnTime > 50)) {
+            lastBtnTime = currentTime;
+            Serial.println("► ENCODER BTN (ENTER)");
         
         if (currentScreen == SCREEN_MENU) {
             // En menú: Enter selecciona opción
@@ -1820,17 +1881,17 @@ void handlePlayStopButton() {
     if (!playStopPressed && lastPlayStopPressed && (currentTime - lastPlayStopBtnTime > 50)) {
         Serial.printf("► PLAY/STOP BUTTON\n");
         
-        // Solo funciona en SEQUENCER
-        if (currentScreen == SCREEN_SEQUENCER) {
-            isPlaying = !isPlaying;
-            if (!isPlaying) {
-                currentStep = 0;
-                setAllLEDs(0x0000);
+        // Funciona en cualquier pantalla
+        isPlaying = !isPlaying;
+        if (!isPlaying) {
+            currentStep = 0;
+            setAllLEDs(0x0000);
+            if (currentScreen == SCREEN_SEQUENCER) {
                 updateStepLEDsForTrack(selectedTrack);
             }
-            Serial.printf("   Sequencer: %s\n", isPlaying ? "PLAYING" : "STOPPED");
-            needsFullRedraw = true;
         }
+        Serial.printf("   Sequencer: %s\n", isPlaying ? "PLAYING" : "STOPPED");
+        needsFullRedraw = true;
     }
     lastPlayStopPressed = playStopPressed;
 }
@@ -1897,7 +1958,7 @@ void handleMuteButton() {
                              selectedTrack, trackNames[selectedTrack],
                              pattern.muted[selectedTrack] ? "MUTED" : "UNMUTED");
                 
-                // Feedback visual
+                // Feedback visual en TM1638
                 if (pattern.muted[selectedTrack]) {
                     tm1.displayText("MUTED  ");
                 } else {
@@ -1905,7 +1966,12 @@ void handleMuteButton() {
                 }
                 tm2.displayText(instrumentNames[selectedTrack]);
                 
-                needsFullRedraw = true;
+                // Actualizar grid para reflejar mute sin parpadeo
+                if (currentScreen == SCREEN_SEQUENCER) {
+                    needsGridUpdate = true;
+                } else {
+                    needsHeaderUpdate = true;
+                }
             }
         }
     }
@@ -1930,8 +1996,16 @@ void handleBackButton() {
     if (!backPressed && lastBackPressed && (currentTime - lastBackBtnTime > 50)) {
         Serial.printf("► BACK BUTTON\n");
         
-        // Desde cualquier pantalla excepto menú, volver al menú
-        if (currentScreen != SCREEN_MENU) {
+        // Desde MENU: mostrar créditos
+        if (currentScreen == SCREEN_MENU) {
+            changeScreen(SCREEN_CREDITS);
+        }
+        // Desde CREDITS: volver a MENU
+        else if (currentScreen == SCREEN_CREDITS) {
+            changeScreen(SCREEN_MENU);
+        }
+        // Desde cualquier otra pantalla: volver al menú
+        else {
             changeScreen(SCREEN_MENU);
         }
     }
@@ -1993,47 +2067,23 @@ void debugAnalogButtons() {
 
 void handleVolume() {
     int raw = analogRead(ROTARY_ANGLE_PIN);
-    int adcButtons = analogRead(ANALOG_BUTTONS_PIN);
-    bool mutePressed = (adcButtons >= BTN_MUTE_MIN && adcButtons <= BTN_MUTE_MAX);
+    int newVol = map(raw, 0, 4095, 30, 0);  // Invertido: girar derecha = subir volumen
     
-    // MODO 1: MUTE presionado = Ajustar BPM
-    if (mutePressed) {
-        int newBPM = map(raw, 0, 4095, MIN_BPM, MAX_BPM);
+    if (abs(newVol - lastVolumeLevel) > 1) {
+        volumeLevel = newVol;
+        lastVolumeLevel = newVol;
         
-        if (abs(newBPM - tempo) > 2) {  // Umbral mayor para evitar cambios erráticos
-            tempo = newBPM;
-            calculateStepInterval();
-            
-            Serial.printf("► BPM: %d (MUTE+Rotary)\n", tempo);
-            needsFullRedraw = true;
-            
-            // Mostrar BPM en displays TM1638
-            char display1[9], display2[9];
-            snprintf(display1, 9, "BPM %3d ", tempo);
-            tm1.displayText(display1);
-            tm2.displayText("        ");
+        // Aplicar volumen al DFPlayer
+        if (samplerInitialized) {
+            dfplayerVolume = volumeLevel;
+            setVolume(dfplayerVolume);
         }
-    }
-    // MODO 2: MUTE NO presionado = Ajustar Volumen (normal)
-    else {
-        int newVol = map(raw, 0, 4095, 30, 0);  // Invertido: girar derecha = subir volumen
         
-        if (abs(newVol - lastVolumeLevel) > 1) {
-            volumeLevel = newVol;
-            lastVolumeLevel = newVol;
-            
-            // Aplicar volumen al DFPlayer
-            if (samplerInitialized) {
-                dfplayerVolume = volumeLevel;
-                setVolume(dfplayerVolume);
-            }
-            
-            Serial.printf("► Volume: %d/30\n", volumeLevel);
-            showVolumeOnTM1638();
-            lastDisplayChange = millis();
-            
-            needsHeaderUpdate = true;
-        }
+        Serial.printf("► Volume: %d/30\n", volumeLevel);
+        showVolumeOnTM1638();
+        lastDisplayChange = millis();
+        
+        needsHeaderUpdate = true;
     }
 }
 
@@ -2707,16 +2757,20 @@ void drawSequencerScreen() {
         tft.setTextSize(2);
         for (int t = 0; t < MAX_TRACKS; t++) {
             int y = gridY + 2 + t * (cellH + 2);
-            // Mostrar MUTED con color diferente
+            
+            // Resaltar track seleccionado con fondo
+            if (t == selectedTrack) {
+                tft.fillRect(gridX, y - 1, labelW - 2, cellH + 2, COLOR_PRIMARY);
+            }
+            
+            // Mostrar MUTED con indicador visual claro
             if (pattern.muted[t]) {
                 tft.setTextColor(COLOR_ERROR);
-                tft.setCursor(gridX + 4, y + 2);
-                tft.print("M");
-                tft.setCursor(gridX + 14, y + 2);
-                tft.print(trackNames[t]);
+                tft.setCursor(gridX + 2, y + 2);
+                tft.print("[M]");
             } else {
                 // Usar color único por instrumento
-                tft.setTextColor(getInstrumentColor(t));
+                tft.setTextColor(t == selectedTrack ? TFT_WHITE : getInstrumentColor(t));
                 tft.setCursor(gridX + 4, y + 2);
                 tft.print(trackNames[t]);
             }
@@ -2725,23 +2779,59 @@ void drawSequencerScreen() {
         lastStep = -1;
     }
     
+    // Redibujar etiquetas si cambi\u00f3 el grid (por ejemplo, al mutear)
+    if (needsGridUpdate) {
+        tft.setTextSize(2);
+        for (int t = 0; t < MAX_TRACKS; t++) {
+            int y = gridY + 2 + t * (cellH + 2);
+            
+            // Limpiar \u00e1rea de etiqueta
+            tft.fillRect(gridX, y - 1, labelW - 2, cellH + 2, 
+                        (t == selectedTrack) ? COLOR_PRIMARY : COLOR_NAVY);
+            
+            // Redibujar etiqueta con estado actualizado
+            if (pattern.muted[t]) {
+                tft.setTextColor(COLOR_ERROR);
+                tft.setCursor(gridX + 2, y + 2);
+                tft.print("[M]");
+            } else {
+                tft.setTextColor(t == selectedTrack ? TFT_WHITE : getInstrumentColor(t));
+                tft.setCursor(gridX + 4, y + 2);
+                tft.print(trackNames[t]);
+            }
+        }
+    }
+    
     for (int t = 0; t < MAX_TRACKS; t++) {
         for (int s = 0; s < MAX_STEPS; s++) {
-            if (needsFullRedraw || (s == currentStep || s == lastStep)) {
+            if (needsFullRedraw || needsGridUpdate || (s == currentStep || s == lastStep)) {
                 int x = gridX + labelW + s * (cellW + 1);
                 int y = gridY + 2 + t * (cellH + 2);
                 
                 uint16_t color;
                 uint16_t border = COLOR_NAVY;
                 
+                // Si el track está muteado, oscurecer todo
+                bool isMuted = pattern.muted[t];
+                
                 if (isPlaying && s == currentStep) {
                     // Durante reproducción, usar color del instrumento si está activo
-                    color = pattern.steps[t][s] ? getInstrumentColor(t) : COLOR_NAVY_LIGHT;
-                    border = pattern.steps[t][s] ? getInstrumentColor(t) : COLOR_WARNING;
+                    if (isMuted) {
+                        color = pattern.steps[t][s] ? 0x2104 : COLOR_NAVY;  // Gris oscuro si muted
+                        border = COLOR_ERROR;
+                    } else {
+                        color = pattern.steps[t][s] ? getInstrumentColor(t) : COLOR_NAVY_LIGHT;
+                        border = pattern.steps[t][s] ? getInstrumentColor(t) : COLOR_WARNING;
+                    }
                 } else if (pattern.steps[t][s]) {
-                    // Step activo: usar color del instrumento
-                    color = getInstrumentColor(t);
-                    border = getInstrumentColor(t);
+                    // Step activo: usar color del instrumento o gris si muted
+                    if (isMuted) {
+                        color = 0x3186;  // Gris medio para indicar muted
+                        border = COLOR_ERROR;
+                    } else {
+                        color = getInstrumentColor(t);
+                        border = getInstrumentColor(t);
+                    }
                 } else {
                     color = COLOR_NAVY_LIGHT;
                 }
@@ -3003,6 +3093,104 @@ void drawVUMeters() {
             tft.fillRoundRect(x + 10, y + padH - 15, barWidth, 8, 4, COLOR_SUCCESS);
         }
     }
+}
+
+void drawCreditsScreen() {
+    tft.fillScreen(0x1800);  // Fondo rojo muy oscuro
+    
+    // Header superior con gradiente simulado
+    tft.fillRect(0, 0, 480, 4, 0xF800);  // Línea roja brillante superior
+    tft.fillRect(0, 4, 480, 50, 0xC000);  // Rojo intenso
+    
+    // Logo/Título principal
+    tft.setTextSize(4);
+    tft.setTextColor(TFT_WHITE);
+    tft.setCursor(100, 15);
+    tft.print("RED808 V5");
+    
+    // Subtítulo
+    tft.setTextSize(1);
+    tft.setTextColor(0xE73C);  // Gris cálido
+    tft.setCursor(175, 50);
+    tft.print("DRUM MACHINE");
+    
+    // Línea divisoria elegante
+    tft.fillRect(40, 70, 400, 2, 0xF800);
+    
+    // Sección principal - THE BOYS
+    int y = 95;
+    
+    tft.setTextSize(2);
+    tft.setTextColor(0xF800);  // Rojo brillante
+    tft.setCursor(130, y);
+    tft.print("THE BOYS");
+    y += 30;
+    
+    // Marco elegante para los nombres
+    tft.drawRoundRect(55, y, 370, 90, 8, 0xC000);
+    tft.drawRoundRect(56, y+1, 368, 88, 8, 0xC000);
+    
+    y += 15;
+    
+    // Nombres del crew en columnas
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_WHITE);
+    
+    // Columna 1
+    tft.setCursor(75, y);
+    tft.print("Freddy");
+    tft.setCursor(75, y + 25);
+    tft.print("Aithor");
+    tft.setCursor(75, y + 50);
+    tft.print("Karz");
+    
+    // Columna 2
+    tft.setCursor(205, y);
+    tft.print("Oriol");
+    tft.setCursor(205, y + 25);
+    tft.print("Victor");
+    
+    // Columna 3
+    tft.setCursor(315, y);
+    tft.print("Marcos");
+    tft.setCursor(315, y + 25);
+    tft.print("Adri");
+    
+    y += 90;
+    
+    // Línea divisoria
+    tft.fillRect(80, y, 320, 1, 0x9800);
+    y += 20;
+    
+    // Special Mention en estilo más sutil
+    tft.setTextSize(1);
+    tft.setTextColor(0xFD20);  // Naranja-rojo
+    tft.setCursor(155, y);
+    tft.print("SPECIAL MENTION");
+    y += 18;
+    
+    tft.setTextSize(2);
+    tft.setTextColor(0xE73C);  // Gris cálido
+    tft.setCursor(160, y);
+    tft.print("Javi");
+    tft.setTextColor(0xAD55);
+    tft.print(" & ");
+    tft.setTextColor(0xE73C);
+    tft.print("Rottem");
+    
+    // Footer corporativo
+    tft.fillRect(0, 295, 480, 25, 0xC000);
+    tft.fillRect(0, 295, 480, 2, 0xF800);  // Línea superior brillante
+    
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_WHITE);
+    tft.setCursor(10, 300);
+    tft.print("Development by Cesko");
+    tft.setCursor(10, 310);
+    tft.print("Lloret de mar 2026");
+    
+    tft.setCursor(360, 305);
+    tft.print("[BACK] Menu");
 }
 
 // ============================================
