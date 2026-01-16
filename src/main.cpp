@@ -38,13 +38,13 @@
 #define ANALOG_BUTTONS_PIN 34  // Pin analógico para leer los 3 botones
 
 // Rangos de valores ADC para cada botón (CALIBRADOS según medición real)
-#define BTN_PLAY_STOP_MIN  550   // Botón 1: Play/Stop (medido: ~663)
-#define BTN_PLAY_STOP_MAX  800
-#define BTN_MUTE_MIN       1350  // Botón 2: Mute/Clear (medido: ~1503)
-#define BTN_MUTE_MAX       1650
-#define BTN_BACK_MIN       2200  // Botón 3: Back (medido: ~2333)
-#define BTN_BACK_MAX       2500
-#define BTN_NONE_THRESHOLD 50    // Ningún botón presionado
+#define BTN_PLAY_STOP_MIN  350   // Botón 1: Play/Stop (medido: 432)
+#define BTN_PLAY_STOP_MAX  650
+#define BTN_MUTE_MIN       1050  // Botón 2: Mute/Clear (medido: 1178)
+#define BTN_MUTE_MAX       1350
+#define BTN_BACK_MIN       1400  // Botón 3: Back (medido: 1460-1523)
+#define BTN_BACK_MAX       1700
+#define BTN_NONE_THRESHOLD 300   // Sin botón presionado
 
 // Rotary Angle Potentiometer (3 pins)
 #define ROTARY_ANGLE_PIN 35
@@ -71,7 +71,7 @@
 #define DEFAULT_BPM 120
 #define DEFAULT_VOLUME 15
 #define MAX_SAMPLES 8
-#define DFPLAYER_VOLUME 25  // Volumen DFPlayer (0-30)
+#define DFPLAYER_VOLUME 30  // Volumen DFPlayer (0-30)
 
 // ============================================
 // SISTEMA DE TEMAS VISUALES
@@ -1106,7 +1106,7 @@ void setup() {
     
     // 3 Button Panel - Analog Buttons
     pinMode(ANALOG_BUTTONS_PIN, INPUT);
-    Serial.println("3 Analog Buttons ready on pin 34 (PLAY/STOP, MUTE, BACK)");
+    Serial.println("5 Analog Buttons ready on pin 34 (PLAY/STOP, MUTE, BPM-, BPM+, BACK)");
     Serial.println("Module: SMART OPEN ANALOG BUTTONS (GND-VCC-SIG)");
     Serial.println("\n╔═══════════════════════════════════════════════════╗");
     Serial.println("║  CALIBRATION MODE ACTIVE                          ║");
@@ -1396,8 +1396,8 @@ void setupDFPlayer() {
     delay(100);
     
     // Configurar volumen inicial
-    setVolume(25);
-    dfplayerVolume = 25;
+    setVolume(30);
+    dfplayerVolume = 30;
     delay(50);
     
     diagnostic.dfplayerOk = true;
@@ -1811,10 +1811,14 @@ void handlePlayStopButton() {
     int adcValue = analogRead(ANALOG_BUTTONS_PIN);
     bool playStopPressed = (adcValue >= BTN_PLAY_STOP_MIN && adcValue <= BTN_PLAY_STOP_MAX);
     
-    // Detectar liberación del botón con debounce
-    if (!playStopPressed && lastPlayStopPressed && (currentTime - lastPlayStopBtnTime > 50)) {
+    // Detectar flanco de subida (presión)
+    if (playStopPressed && !lastPlayStopPressed) {
         lastPlayStopBtnTime = currentTime;
-        Serial.printf("► PLAY/STOP BUTTON (ADC: %d)\n", adcValue);
+    }
+    
+    // Detectar flanco de bajada (liberación) con debounce
+    if (!playStopPressed && lastPlayStopPressed && (currentTime - lastPlayStopBtnTime > 50)) {
+        Serial.printf("► PLAY/STOP BUTTON\n");
         
         // Solo funciona en SEQUENCER
         if (currentScreen == SCREEN_SEQUENCER) {
@@ -1917,10 +1921,14 @@ void handleBackButton() {
     int adcValue = analogRead(ANALOG_BUTTONS_PIN);
     bool backPressed = (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX);
     
-    // Detectar liberación del botón con debounce
-    if (!backPressed && lastBackPressed && (currentTime - lastBackBtnTime > 50)) {
+    // Detectar flanco de subida (presión)
+    if (backPressed && !lastBackPressed) {
         lastBackBtnTime = currentTime;
-        Serial.printf("► BACK BUTTON (ADC: %d)\n", adcValue);
+    }
+    
+    // Detectar flanco de bajada (liberación) solo si se presionó antes
+    if (!backPressed && lastBackPressed && (currentTime - lastBackBtnTime > 50)) {
+        Serial.printf("► BACK BUTTON\n");
         
         // Desde cualquier pantalla excepto menú, volver al menú
         if (currentScreen != SCREEN_MENU) {
@@ -1947,8 +1955,8 @@ void debugAnalogButtons() {
             Serial.printf("ADC Value: %4d\n", adcValue);
             
             // Determinar qué botón está presionado
-            if (adcValue < BTN_NONE_THRESHOLD) {
-                Serial.println("Status: NO BUTTON PRESSED");
+            if (adcValue < BTN_NONE_THRESHOLD || adcValue > 4000) {
+                Serial.println("Status: NO BUTTON PRESSED (pull-up)");
             }
             else if (adcValue >= BTN_PLAY_STOP_MIN && adcValue <= BTN_PLAY_STOP_MAX) {
                 Serial.println("Button: PLAY/STOP ✓");
@@ -1985,17 +1993,47 @@ void debugAnalogButtons() {
 
 void handleVolume() {
     int raw = analogRead(ROTARY_ANGLE_PIN);
-    int newVol = map(raw, 0, 4095, 30, 0);  // Invertido: girar derecha = subir volumen
+    int adcButtons = analogRead(ANALOG_BUTTONS_PIN);
+    bool mutePressed = (adcButtons >= BTN_MUTE_MIN && adcButtons <= BTN_MUTE_MAX);
     
-    if (abs(newVol - lastVolumeLevel) > 1) {
-        volumeLevel = newVol;
-        lastVolumeLevel = newVol;
+    // MODO 1: MUTE presionado = Ajustar BPM
+    if (mutePressed) {
+        int newBPM = map(raw, 0, 4095, MIN_BPM, MAX_BPM);
         
-        Serial.printf("► Volume: %d/30\n", volumeLevel);
-        showVolumeOnTM1638();
-        lastDisplayChange = millis();
+        if (abs(newBPM - tempo) > 2) {  // Umbral mayor para evitar cambios erráticos
+            tempo = newBPM;
+            calculateStepInterval();
+            
+            Serial.printf("► BPM: %d (MUTE+Rotary)\n", tempo);
+            needsFullRedraw = true;
+            
+            // Mostrar BPM en displays TM1638
+            char display1[9], display2[9];
+            snprintf(display1, 9, "BPM %3d ", tempo);
+            tm1.displayText(display1);
+            tm2.displayText("        ");
+        }
+    }
+    // MODO 2: MUTE NO presionado = Ajustar Volumen (normal)
+    else {
+        int newVol = map(raw, 0, 4095, 30, 0);  // Invertido: girar derecha = subir volumen
         
-        needsHeaderUpdate = true;
+        if (abs(newVol - lastVolumeLevel) > 1) {
+            volumeLevel = newVol;
+            lastVolumeLevel = newVol;
+            
+            // Aplicar volumen al DFPlayer
+            if (samplerInitialized) {
+                dfplayerVolume = volumeLevel;
+                setVolume(dfplayerVolume);
+            }
+            
+            Serial.printf("► Volume: %d/30\n", volumeLevel);
+            showVolumeOnTM1638();
+            lastDisplayChange = millis();
+            
+            needsHeaderUpdate = true;
+        }
     }
 }
 
