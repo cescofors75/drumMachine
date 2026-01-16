@@ -143,7 +143,7 @@ function buildPatternGrid() {
 }
 
 function buildLivePads() {
-    const container = document.getElementById('livePadsGrid');
+    const container = document.getElementById('padsGrid');
     if (!container) return;
     
     container.innerHTML = '';
@@ -165,74 +165,118 @@ function buildLivePads() {
 }
 
 // ============================================
+// NAVIGATION
+// ============================================
+function setupNavigation() {
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.preventDefault();
+            const view = item.dataset.view;
+            switchView(view);
+        });
+    });
+}
+
+function switchView(view) {
+    // Actualizar navegación
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.view === view);
+    });
+    
+    // Actualizar vistas
+    document.querySelectorAll('.view-content').forEach(v => {
+        v.classList.toggle('active', v.id === `view${view.charAt(0).toUpperCase() + view.slice(1)}`);
+    });
+    
+    // Actualizar título
+    const titles = {
+        'sequencer': 'Sequencer',
+        'livepads': 'Live Pads',
+        'settings': 'Settings',
+        'diagnostic': 'Diagnostic'
+    };
+    
+    const titleEl = document.getElementById('viewTitle');
+    if (titleEl) titleEl.textContent = titles[view] || 'RED808';
+    
+    // Inicializar controles específicos de cada vista
+    if (view === 'settings') {
+        initializeWiFiControls();
+    }
+    
+    console.log(`Switched to view: ${view}`);
+}
+
+// ============================================
 // EVENT LISTENERS
 // ============================================
 function attachEventListeners() {
-    // Play/Stop/Record
-    const btnPlay = document.getElementById('ctrlPlay');
-    const btnStop = document.getElementById('ctrlStop');
-    const btnRec = document.getElementById('ctrlRec');
+    // Navigation
+    setupNavigation();
     
-    if (btnPlay) btnPlay.addEventListener('click', () => sendCommand('/play'));
-    if (btnStop) btnStop.addEventListener('click', () => sendCommand('/stop'));
-    if (btnRec) btnRec.addEventListener('click', () => alert('Record mode - Coming soon'));
+    // Transport controls
+    const btnPlay = document.getElementById('transportPlay');
+    const btnStop = document.getElementById('transportStop');
+    const btnRec = document.getElementById('transportRec');
     
-    // Tempo
-    const btnTempoPlus = document.getElementById('tempoPlus');
-    const btnTempoMinus = document.getElementById('tempoMinus');
+    if (btnPlay) btnPlay.addEventListener('click', () => {
+        sendCommand('/play');
+        console.log('Play clicked');
+    });
+    if (btnStop) btnStop.addEventListener('click', () => {
+        sendCommand('/stop');
+        console.log('Stop clicked');
+    });
+    if (btnRec) btnRec.addEventListener('click', () => {
+        alert('Record mode - Coming soon');
+    });
     
-    if (btnTempoPlus) btnTempoPlus.addEventListener('click', () => sendCommand('/tempo', { delta: 5 }));
-    if (btnTempoMinus) btnTempoMinus.addEventListener('click', () => sendCommand('/tempo', { delta: -5 }));
+    // Tempo controls
+    const btnTempoUp = document.getElementById('tempoUp');
+    const btnTempoDown = document.getElementById('tempoDown');
+    
+    if (btnTempoUp) btnTempoUp.addEventListener('click', () => {
+        sendCommand('/tempo', { delta: 5 });
+    });
+    if (btnTempoDown) btnTempoDown.addEventListener('click', () => {
+        sendCommand('/tempo', { delta: -5 });
+    });
     
     // Volume
     const volumeSlider = document.getElementById('volumeSlider');
-    const volValue = document.getElementById('volValue');
+    const volumeValue = document.getElementById('volumeValue');
     
     if (volumeSlider) {
         volumeSlider.addEventListener('input', (e) => {
             const val = e.target.value;
-            if (volValue) volValue.textContent = val;
+            if (volumeValue) volumeValue.textContent = val;
         });
         
         volumeSlider.addEventListener('change', (e) => {
             const val = e.target.value;
             sendCommand('/volume', { value: val });
+            console.log(`Volume changed to ${val}`);
         });
     }
     
     // Kit selector
-    document.querySelectorAll('.kit-select-btn').forEach((btn, idx) => {
-        btn.addEventListener('click', () => {
-            sendCommand('/kit', { kit: idx });
+    const kitSelector = document.getElementById('kitSelector');
+    if (kitSelector) {
+        kitSelector.addEventListener('change', (e) => {
+            const kitNum = parseInt(e.target.value);
+            sendCommand('/kit', { kit: kitNum });
+            console.log(`Kit changed to ${kitNum}`);
         });
-    });
+    }
     
-    // Track labels (selección de track)
-    document.querySelectorAll('.track-label').forEach((label, idx) => {
-        label.addEventListener('click', () => {
-            selectedTrack = idx;
-            document.querySelectorAll('.track-label').forEach(l => l.classList.remove('active'));
-            label.classList.add('active');
-            updateInstrumentDisplay();
-        });
-    });
+    // Pattern buttons
+    const btnCopyPattern = document.getElementById('btnCopyPattern');
+    const btnClearPattern = document.getElementById('btnClearPattern');
     
-    // Side buttons
-    const btnClear = document.getElementById('btnClear');
-    const btnMute = document.getElementById('btnMute');
-    const btnCopy = document.getElementById('btnCopy');
+    if (btnCopyPattern) btnCopyPattern.addEventListener('click', () => copyPattern());
+    if (btnClearPattern) btnClearPattern.addEventListener('click', () => clearPattern());
     
-    if (btnClear) btnClear.addEventListener('click', () => clearTrack());
-    if (btnMute) btnMute.addEventListener('click', () => muteTrack());
-    if (btnCopy) btnCopy.addEventListener('click', () => copyPattern());
-    
-    // LCD Tabs
-    document.querySelectorAll('.lcd-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            const view = tab.dataset.tab;
-            switchView(view);
-        });
-    });
+    console.log('Event listeners attached');
 }
 
 // ============================================
@@ -317,6 +361,36 @@ function copyPattern() {
     alert(`Pattern ${currentPattern + 1} copied to ${target + 1}`);
 }
 
+function clearPattern() {
+    if (!confirm(`Clear entire pattern ${currentPattern + 1}?`)) return;
+    
+    // Limpiar todos los tracks
+    for (let track = 0; track < MAX_TRACKS; track++) {
+        for (let step = 0; step < MAX_STEPS; step++) {
+            patterns[currentPattern][track][step] = false;
+            updateStepCell(track, step, false);
+        }
+        // Enviar clear al ESP32 por cada track
+        sendCommand('/clear', { track: track });
+    }
+    
+    console.log(`Pattern ${currentPattern + 1} cleared`);
+}
+
+function triggerSample(track) {
+    // Enviar trigger al ESP32
+    sendCommand('/trigger', { track: track });
+    
+    // Feedback visual
+    const pad = document.querySelector(`.live-pad[data-track="${track}"]`);
+    if (pad) {
+        pad.classList.add('active');
+        setTimeout(() => pad.classList.remove('active'), 200);
+    }
+    
+    console.log(`Sample ${track + 1} triggered`);
+}
+
 // ============================================
 // PATTERN MANAGEMENT
 // ============================================
@@ -358,79 +432,6 @@ async function fetchPatternData() {
 }
 
 // ============================================
-// VIEW SWITCHING
-// ============================================
-function switchView(view) {
-    currentView = view;
-    
-    // Actualizar tabs
-    document.querySelectorAll('.lcd-tab').forEach(tab => {
-        tab.classList.toggle('active', tab.dataset.tab === view);
-    });
-    
-    // Mostrar/ocultar secciones
-    const sequencer = document.querySelector('.lcd-sequencer');
-    
-    if (view === 'seq') {
-        if (sequencer) sequencer.style.display = 'grid';
-        // TODO: Ocultar otras vistas
-    } else if (view === 'pad') {
-        if (sequencer) sequencer.style.display = 'none';
-        // TODO: Mostrar Live Pads
-        showLivePads();
-    } else if (view === 'boot') {
-        if (sequencer) sequencer.style.display = 'none';
-        showBootInfo();
-    }
-}
-
-function showLivePads() {
-    const sequencer = document.querySelector('.lcd-sequencer');
-    if (!sequencer) return;
-    
-    // Crear vista de Live Pads
-    let padsHTML = '<div class="live-pads-grid">';
-    for (let i = 0; i < MAX_TRACKS; i++) {
-        padsHTML += `
-            <div class="live-pad" data-track="${i}" ontouchstart="triggerSample(${i})" onmousedown="triggerSample(${i})">
-                <div class="pad-num">${i + 1}</div>
-                <div class="pad-name">${TRACK_NAMES[i]}</div>
-            </div>
-        `;
-    }
-    padsHTML += '</div>';
-    
-    sequencer.outerHTML = padsHTML;
-}
-
-function showBootInfo() {
-    const sequencer = document.querySelector('.lcd-sequencer');
-    if (!sequencer) return;
-    
-    sequencer.outerHTML = `
-        <div class="boot-info">
-            <h2>RED808 V5</h2>
-            <p>WiFi: Connected</p>
-            <p>IP: 192.168.4.1</p>
-            <p>Firmware: v5.0</p>
-            <p>Patterns: ${MAX_PATTERNS}</p>
-            <p>Tracks: ${MAX_TRACKS}</p>
-        </div>
-    `;
-}
-
-function triggerSample(track) {
-    sendCommand('/trigger', { track: track });
-    
-    // Feedback visual
-    const pad = document.querySelector(`.live-pad[data-track="${track}"]`);
-    if (pad) {
-        pad.style.transform = 'scale(0.9)';
-        setTimeout(() => { pad.style.transform = 'scale(1)'; }, 100);
-    }
-}
-
-// ============================================
 // COMUNICACIÓN CON ESP32
 // ============================================
 async function sendCommand(endpoint, data = {}) {
@@ -465,14 +466,13 @@ async function fetchStatus() {
 }
 
 function updateUIFromESP32(data) {
-    // BPM
+    // BPM/Tempo
     if (data.bpm !== undefined) {
         tempo = data.bpm;
-        const elements = ['lcdBpm', 'tempoNum'];
-        elements.forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = data.bpm;
-        });
+        const tempoDisplay = document.getElementById('tempoDisplay');
+        const headerBpm = document.getElementById('headerBpm');
+        if (tempoDisplay) tempoDisplay.textContent = data.bpm;
+        if (headerBpm) headerBpm.textContent = data.bpm;
     }
     
     // Pattern
@@ -481,8 +481,8 @@ function updateUIFromESP32(data) {
         document.querySelectorAll('.pattern-btn').forEach((btn, idx) => {
             btn.classList.toggle('active', idx === data.pattern);
         });
-        const ftPattern = document.getElementById('ftPattern');
-        if (ftPattern) ftPattern.textContent = data.pattern + 1;
+        const headerPattern = document.getElementById('headerPattern');
+        if (headerPattern) headerPattern.textContent = data.pattern + 1;
         
         // Recargar patrón
         fetchPatternData();
@@ -491,74 +491,59 @@ function updateUIFromESP32(data) {
     // Kit
     if (data.kit !== undefined) {
         currentKit = data.kit;
-        const lcdKit = document.getElementById('lcdKit');
-        if (lcdKit) lcdKit.textContent = data.kit + 1;
+        const headerKit = document.getElementById('headerKit');
+        if (headerKit) headerKit.textContent = data.kit + 1;
         
-        if (data.kitName) {
-            const kitDisplay = document.getElementById('kitDisplay');
-            if (kitDisplay) kitDisplay.textContent = data.kitName;
-        }
-        
-        document.querySelectorAll('.kit-select-btn').forEach((btn, idx) => {
-            btn.classList.toggle('active', idx === data.kit);
-        });
+        const kitSelector = document.getElementById('kitSelector');
+        if (kitSelector) kitSelector.value = data.kit;
     }
     
-    // Playing
+    // Playing state
     if (data.playing !== undefined) {
         isPlaying = data.playing;
-        const btnPlay = document.getElementById('ctrlPlay');
+        const btnPlay = document.getElementById('transportPlay');
         if (btnPlay) {
             btnPlay.classList.toggle('active', data.playing);
-            btnPlay.textContent = data.playing ? '⏸' : '▶';
+            const svg = btnPlay.querySelector('svg path');
+            if (svg && data.playing) {
+                svg.setAttribute('d', 'M6 4h4v16H6V4zm8 0h4v16h-4V4z'); // Pause icon
+            } else if (svg) {
+                svg.setAttribute('d', 'M8 5v14l11-7z'); // Play icon
+            }
         }
     }
     
-    // Current Step
+    // Current Step (playhead)
     if (data.step !== undefined) {
         currentStep = data.step;
         updatePlayingStep(data.step);
         
-        const ftStep = document.getElementById('ftStep');
-        if (ftStep) ftStep.textContent = data.step + 1;
-        
-        // Actualizar display de 7 segmentos
-        updateSeg7Display(data.step + 1);
+        const headerStep = document.getElementById('headerStep');
+        if (headerStep) headerStep.textContent = data.step + 1;
     }
     
     // Track
     if (data.track !== undefined) {
         selectedTrack = data.track;
-        const ftTrack = document.getElementById('ftTrack');
-        if (ftTrack) ftTrack.textContent = data.track + 1;
-        
-        updateInstrumentDisplay();
+        const headerTrack = document.getElementById('headerTrack');
+        if (headerTrack) headerTrack.textContent = data.track + 1;
     }
     
-    // Volume
-    if (data.volume !== undefined) {
-        volume = data.volume;
-        const slider = document.getElementById('volumeSlider');
-        const volValue = document.getElementById('volValue');
-        if (slider) slider.value = data.volume;
-        if (volValue) volValue.textContent = data.volume;
-    }
+    // Connection OK
+    updateConnectionStatus(true);
 }
 
 function updatePlayingStep(step) {
-    // Actualizar LEDs
-    document.querySelectorAll('.step-led').forEach((led, idx) => {
-        led.classList.toggle('active', idx === step);
-    });
-    
-    // Highlight en grid
+    // Highlight en grid - resaltar columna del step actual
     if (isPlaying) {
-        document.querySelectorAll('.lcd-step').forEach(cell => {
+        document.querySelectorAll('.step-cell').forEach(cell => {
             const cellStep = parseInt(cell.dataset.step);
-            if (cellStep === step) {
-                cell.classList.add('playing');
-                setTimeout(() => cell.classList.remove('playing'), 150);
-            }
+            cell.classList.toggle('playing', cellStep === step);
+        });
+        
+        // Resaltar número de step
+        document.querySelectorAll('.step-number').forEach((num, idx) => {
+            num.classList.toggle('active', idx === step);
         });
     }
 }
@@ -617,23 +602,27 @@ window.addEventListener('beforeunload', () => stopSyncLoop());
 // ============================================
 // WIFI CONTROL
 // ============================================
-const wifiToggle = document.getElementById('wifiToggle');
-const wifiToggleText = document.getElementById('wifiToggleText');
-const wifiStatusBadge = document.getElementById('wifiStatusBadge');
+function initializeWiFiControls() {
+    const wifiToggle = document.getElementById('wifiToggle');
+    const wifiToggleText = document.getElementById('wifiToggleText');
+    const wifiStatusBadge = document.getElementById('wifiStatusBadge');
 
-if (wifiToggle) {
+    if (!wifiToggle) return; // No inicializar si no están los elementos
+    
     wifiToggle.addEventListener('change', async () => {
         const enabled = wifiToggle.checked;
-        wifiToggleText.textContent = enabled ? 'Enabling...' : 'Disabling...';
+        if (wifiToggleText) wifiToggleText.textContent = enabled ? 'Enabling...' : 'Disabling...';
         
         try {
             const response = await fetch(`/wifi?enabled=${enabled ? '1' : '0'}`);
             const text = await response.text();
             console.log('WiFi toggle:', text);
             
-            wifiToggleText.textContent = enabled ? 'Enabled' : 'Disabled';
-            wifiStatusBadge.textContent = enabled ? 'Active' : 'Inactive';
-            wifiStatusBadge.className = 'status-badge ' + (enabled ? 'ok' : 'error');
+            if (wifiToggleText) wifiToggleText.textContent = enabled ? 'Enabled' : 'Disabled';
+            if (wifiStatusBadge) {
+                wifiStatusBadge.textContent = enabled ? 'Active' : 'Inactive';
+                wifiStatusBadge.className = 'status-badge ' + (enabled ? 'ok' : 'error');
+            }
             
             if (!enabled) {
                 // Mostrar advertencia de desconexión
@@ -644,7 +633,7 @@ if (wifiToggle) {
         } catch (err) {
             console.error('Error toggling WiFi:', err);
             wifiToggle.checked = !enabled; // Revertir
-            wifiToggleText.textContent = !enabled ? 'Enabled' : 'Disabled';
+            if (wifiToggleText) wifiToggleText.textContent = !enabled ? 'Enabled' : 'Disabled';
         }
     });
     
@@ -653,10 +642,12 @@ if (wifiToggle) {
         try {
             const response = await fetch('/wifi');
             const data = await JSON.parse(await response.text());
-            wifiToggle.checked = data.enabled;
-            wifiToggleText.textContent = data.enabled ? 'Enabled' : 'Disabled';
-            wifiStatusBadge.textContent = data.enabled ? 'Active' : 'Inactive';
-            wifiStatusBadge.className = 'status-badge ' + (data.enabled ? 'ok' : 'error');
+            if (wifiToggle) wifiToggle.checked = data.enabled;
+            if (wifiToggleText) wifiToggleText.textContent = data.enabled ? 'Enabled' : 'Disabled';
+            if (wifiStatusBadge) {
+                wifiStatusBadge.textContent = data.enabled ? 'Active' : 'Inactive';
+                wifiStatusBadge.className = 'status-badge ' + (data.enabled ? 'ok' : 'error');
+            }
             
             // Actualizar clientes conectados
             const clientsDisplay = document.getElementById('connectedClients');
@@ -669,7 +660,7 @@ if (wifiToggle) {
     }
     
     // Actualizar estado cada 2 segundos
+    updateWiFiStatus(); // Estado inicial
     setInterval(updateWiFiStatus, 2000);
-    updateWiFiStatus();
 }
 
