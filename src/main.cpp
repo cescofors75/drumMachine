@@ -1629,11 +1629,13 @@ void handleSamplerFunction(SamplerFunction func) {
             
         case FUNC_VOLUME_UP:
             dfplayerVolume = constrain(dfplayerVolume + 2, 0, 30);
+            volume = dfplayerVolume;
             setVolume(dfplayerVolume);
             break;
             
         case FUNC_VOLUME_DN:
             dfplayerVolume = constrain(dfplayerVolume - 2, 0, 30);
+            volume = dfplayerVolume;
             setVolume(dfplayerVolume);
             break;
             
@@ -3518,6 +3520,7 @@ void setupWebServer() {
         json += ",\"playing\":" + String(isPlaying ? "true" : "false");
         json += ",\"step\":" + String(currentStep);
         json += ",\"track\":" + String(selectedTrack);
+        json += ",\"volume\":" + String(volume);
         json += ",\"kitName\":\"" + kits[currentKit].name + "\"";
         json += ",\"time\":" + String(millis() / 1000.0, 1);
         json += "}";
@@ -3645,7 +3648,8 @@ void setupWebServer() {
         if (request->hasParam("value")) {
             int newVolume = request->getParam("value")->value().toInt();
             volume = constrain(newVolume, 0, 30);
-            // Aplicar volumen al DFPlayer si está disponible
+            dfplayerVolume = volume;
+            setVolume(dfplayerVolume);
             Serial.printf("► VOLUME set: %d (Web)\n", volume);
         }
         request->send(200, "application/json", "{\"volume\":" + String(volume) + "}");

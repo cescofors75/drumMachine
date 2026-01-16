@@ -2,7 +2,8 @@
 // Sincronización bidireccional completa
 
 const TRACK_NAMES = ['KICK', 'SNARE', 'CLHAT', 'OPHAT', 'CLAP', 'TOMLO', 'TOMHI', 'CYMBAL'];
-const KIT_NAMES = ['808 CLASSIC', 'ELEKTRO', 'HOUSE'];
+const KIT_NAMES = ['808 CLASSIC', '808 BRIGHT', '808 DRY'];
+const THEME_NAMES = ['RED808', 'NAVY', 'CYBER', 'EMERALD'];
 const MAX_STEPS = 16;
 const MAX_TRACKS = 8;
 const MAX_PATTERNS = 16;
@@ -13,6 +14,7 @@ let currentStep = 0;
 let selectedTrack = 0;
 let tempo = 120;
 let volume = 15;
+let currentTheme = 0;
 let isPlaying = false;
 let patterns = [];
 let updateInterval = null;
@@ -28,14 +30,18 @@ document.addEventListener('DOMContentLoaded', () => {
     buildPatternGrid();
     buildLivePads();
     attachEventListeners();
-    startSyncLoop();
     
     console.log('RED808 Professional Interface - Loaded');
     
-    // Cargar estado inicial del ESP32
+    // Cargar estado inicial del ESP32 ANTES de iniciar sync loop
     setTimeout(() => {
         fetchStatus(); // Cargar BPM, volumen, etc
         fetchPatternData(); // Cargar patrón
+        
+        // Iniciar sync loop después de cargar estado inicial
+        setTimeout(() => {
+            startSyncLoop();
+        }, 300);
     }, 500);
 });
 
@@ -262,15 +268,16 @@ function attachEventListeners() {
     // Volume controls en header
     const btnVolumeUp = document.getElementById('volumeUp');
     const btnVolumeDown = document.getElementById('volumeDown');
-    const volumeDisplayHeader = document.getElementById('volumeDisplayHeader');
     
     if (btnVolumeUp) btnVolumeUp.addEventListener('click', () => {
-        const newVol = Math.min(30, volume + 1);
-        sendCommand('/volume', { value: newVol });
+        volume = Math.min(30, volume + 1);
+        updateVolumeDisplay();
+        sendCommand('/volume', { value: volume });
     });
     if (btnVolumeDown) btnVolumeDown.addEventListener('click', () => {
-        const newVol = Math.max(0, volume - 1);
-        sendCommand('/volume', { value: newVol });
+        volume = Math.max(0, volume - 1);
+        updateVolumeDisplay();
+        sendCommand('/volume', { value: volume });
     });
     
     // Volume slider en settings
@@ -310,6 +317,8 @@ function attachEventListeners() {
     // Live Pads controls
     const padLoopBtn = document.getElementById('padLoopBtn');
     const padHoldBtn = document.getElementById('padHoldBtn');
+    const padRecBtn = document.getElementById('padRecBtn');
+    const padPlayStopBtn = document.getElementById('padPlayStopBtn');
     
     if (padLoopBtn) padLoopBtn.addEventListener('click', () => {
         padLoopBtn.classList.toggle('active');
@@ -325,18 +334,102 @@ function attachEventListeners() {
         console.log('Pad Hold:', enabled);
     });
     
-    // Keyboard shortcuts para Live Pads (teclas 1-8)
+    if (padRecBtn) padRecBtn.addEventListener('click', () => {
+        padRecBtn.classList.toggle('active');
+        const enabled = padRecBtn.classList.contains('active');
+        sendCommand('/record', { enabled: enabled ? 1 : 0 });
+        console.log('Pad Record:', enabled);
+    });
+    
+    if (padPlayStopBtn) padPlayStopBtn.addEventListener('click', () => {
+        padPlayStopBtn.classList.toggle('active');
+        const enabled = padPlayStopBtn.classList.contains('active');
+        if (enabled) {
+            sendCommand('/play');
+            const svg = padPlayStopBtn.querySelector('svg path');
+            if (svg) svg.setAttribute('d', 'M6 6h12v12H6z'); // Stop icon
+            padPlayStopBtn.querySelector('span').textContent = 'STOP';
+        } else {
+            sendCommand('/stop');
+            const svg = padPlayStopBtn.querySelector('svg path');
+            if (svg) svg.setAttribute('d', 'M8 5v14l11-7z'); // Play icon
+            padPlayStopBtn.querySelector('span').textContent = 'PLAY';
+        }
+        console.log('Pad Play/Stop:', enabled);
+    });
+    
+    // Kit selector en Live Pads
+    const kitSelectorPads = document.getElementById('kitSelectorPads');
+    if (kitSelectorPads) {
+        kitSelectorPads.addEventListener('change', (e) => {
+            const kitNum = parseInt(e.target.value);
+            currentKit = kitNum;
+            sendCommand('/kit', { kit: kitNum });
+            
+            // Sincronizar con el otro selector
+            const kitSelector = document.getElementById('kitSelector');
+            if (kitSelector) kitSelector.value = kitNum;
+            
+            console.log(`Kit changed to ${kitNum}`);
+        });
+    }
+    
+    // Theme selector
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const theme = parseInt(btn.dataset.theme);
+            changeTheme(theme);
+        });
+    });
+    
+    // Keyboard shortcuts globales
     document.addEventListener('keydown', (e) => {
         // Solo activar si no estamos escribiendo en un input
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
             return;
         }
         
-        const key = e.key;
+        const key = e.key.toLowerCase();
+        
+        // Teclas 1-8: Live Pads
         if (key >= '1' && key <= '8') {
             const track = parseInt(key) - 1;
             triggerSample(track);
-            e.preventDefault(); // Prevenir acción por defecto
+            e.preventDefault();
+        }
+        
+        // Barra espaciadora: Play/Stop
+        else if (key === ' ' || e.code === 'Space') {
+            togglePlayStop();
+            e.preventDefault();
+        }
+        
+        // Q/A: BPM
+        else if (key === 'q') {
+            tempo = Math.min(300, tempo + 5);
+            updateBPMDisplay();
+            sendCommand('/tempo', { bpm: tempo });
+            e.preventDefault();
+        }
+        else if (key === 'a') {
+            tempo = Math.max(40, tempo - 5);
+            updateBPMDisplay();
+            sendCommand('/tempo', { bpm: tempo });
+            e.preventDefault();
+        }
+        
+        // W/S: Volumen
+        else if (key === 'w') {
+            volume = Math.min(30, volume + 1);
+            updateVolumeDisplay();
+            sendCommand('/volume', { value: volume });
+            e.preventDefault();
+        }
+        else if (key === 's') {
+            volume = Math.max(0, volume - 1);
+            updateVolumeDisplay();
+            sendCommand('/volume', { value: volume });
+            e.preventDefault();
         }
     });
     
@@ -456,6 +549,37 @@ function triggerSample(track) {
 }
 
 // ============================================
+// HELPER FUNCTIONS PARA DISPLAYS
+// ============================================
+function updateBPMDisplay() {
+    // Actualizar header
+    const bpmDisplayHeader = document.getElementById('bpmDisplay');
+    if (bpmDisplayHeader) bpmDisplayHeader.textContent = tempo;
+    
+    // Actualizar settings
+    const tempoSlider = document.getElementById('tempoSlider');
+    const tempoValue = document.getElementById('tempoValue');
+    if (tempoSlider) tempoSlider.value = tempo;
+    if (tempoValue) tempoValue.textContent = tempo;
+    
+    // Actualizar footer
+    const ftTempo = document.getElementById('ftTempo');
+    if (ftTempo) ftTempo.textContent = tempo;
+}
+
+function updateVolumeDisplay() {
+    // Actualizar header
+    const volumeDisplayHeader = document.getElementById('volumeDisplayHeader');
+    if (volumeDisplayHeader) volumeDisplayHeader.textContent = volume;
+    
+    // Actualizar settings
+    const volumeSlider = document.getElementById('volumeSlider');
+    const volumeValue = document.getElementById('volumeValue');
+    if (volumeSlider) volumeSlider.value = volume;
+    if (volumeValue) volumeValue.textContent = volume;
+}
+
+// ============================================
 // PATTERN MANAGEMENT
 // ============================================
 function changePattern(patternNum) {
@@ -477,6 +601,29 @@ function changePattern(patternNum) {
     // Actualizar footer
     const ftPattern = document.getElementById('ftPattern');
     if (ftPattern) ftPattern.textContent = patternNum + 1;
+}
+
+function changeTheme(themeNum) {
+    if (themeNum === currentTheme) return;
+    
+    currentTheme = themeNum;
+    
+    // Actualizar botones
+    document.querySelectorAll('.theme-btn').forEach((btn, idx) => {
+        btn.classList.toggle('active', idx === themeNum);
+    });
+    
+    // Aplicar tema al body
+    document.body.className = ''; // Limpiar clases
+    if (themeNum === 1) document.body.classList.add('theme-navy');
+    else if (themeNum === 2) document.body.classList.add('theme-cyber');
+    else if (themeNum === 3) document.body.classList.add('theme-emerald');
+    // themeNum === 0 es RED808, no necesita clase adicional
+    
+    // Enviar al ESP32
+    sendCommand('/theme', { theme: themeNum });
+    
+    console.log(`Theme changed to ${THEME_NAMES[themeNum]}`);
 }
 
 async function fetchPatternData() {
@@ -519,6 +666,8 @@ async function fetchStatus() {
     try {
         const response = await fetch('/status');
         const data = await response.json();
+        
+        console.log('Status received:', data); // Debug log
         
         updateUIFromESP32(data);
         updateConnectionStatus(true);
@@ -596,6 +745,8 @@ function updateUIFromESP32(data) {
     // Volume
     if (data.volume !== undefined) {
         volume = data.volume;
+        console.log('Volume received from ESP32:', data.volume);
+        
         const volumeDisplayHeader = document.getElementById('volumeDisplayHeader');
         if (volumeDisplayHeader) volumeDisplayHeader.textContent = data.volume;
         
@@ -603,6 +754,13 @@ function updateUIFromESP32(data) {
         const volumeValue = document.getElementById('volumeValue');
         if (volumeSlider) volumeSlider.value = data.volume;
         if (volumeValue) volumeValue.textContent = data.volume;
+    } else {
+        console.log('Volume not received in status data');
+    }
+    
+    // Theme
+    if (data.theme !== undefined && data.theme !== currentTheme) {
+        changeTheme(data.theme);
     }
     
     // Connection OK

@@ -168,17 +168,27 @@
                                     <label>Kit:</label>
                                     <select id="kitSelectorPads" class="select-control">
                                         <option value="0">808 Classic</option>
-                                        <option value="1">Elektro</option>
-                                        <option value="2">House</option>
+                                        <option value="1">808 Bright</option>
+                                        <option value="2">808 Dry</option>
                                     </select>
                                 </div>
+                                <div class="divider-vertical"></div>
+                                <button class="option-btn" id="padRecBtn" title="Record">
+                                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg>
+                                    <span>REC</span>
+                                </button>
+                                <button class="option-btn" id="padPlayStopBtn" title="Play/Stop">
+                                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                    <span>PLAY</span>
+                                </button>
+                                <div class="divider-vertical"></div>
                                 <button class="option-btn" id="padLoopBtn" title="Loop Mode">
                                     <svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
-                                    <span>Loop</span>
+                                    <span>LOOP</span>
                                 </button>
                                 <button class="option-btn" id="padHoldBtn" title="Hold Mode">
                                     <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
-                                    <span>Hold</span>
+                                    <span>HOLD</span>
                                 </button>
                             </div>
                         </div>
@@ -218,9 +228,34 @@
                                 <label class="setting-label">Kit</label>
                                 <select id="kitSelector" class="select-control">
                                     <option value="0">808 Classic</option>
-                                    <option value="1">Elektro</option>
-                                    <option value="2">House</option>
+                                    <option value="1">808 Bright</option>
+                                    <option value="2">808 Dry</option>
                                 </select>
+                            </div>
+                        </div>
+                        
+                        <div class="settings-section">
+                            <h3>Appearance</h3>
+                            <div class="settings-group">
+                                <label class="setting-label">Color Theme</label>
+                                <div class="theme-selector">
+                                    <button class="theme-btn active" data-theme="0" id="themeRed">
+                                        <span class="theme-preview" style="background: linear-gradient(135deg, #ff0000, #990000);"></span>
+                                        <span class="theme-name">RED808</span>
+                                    </button>
+                                    <button class="theme-btn" data-theme="1" id="themeNavy">
+                                        <span class="theme-preview" style="background: linear-gradient(135deg, #0066cc, #003366);"></span>
+                                        <span class="theme-name">NAVY</span>
+                                    </button>
+                                    <button class="theme-btn" data-theme="2" id="themeCyber">
+                                        <span class="theme-preview" style="background: linear-gradient(135deg, #00ffff, #0088ff);"></span>
+                                        <span class="theme-name">CYBER</span>
+                                    </button>
+                                    <button class="theme-btn" data-theme="3" id="themeEmerald">
+                                        <span class="theme-preview" style="background: linear-gradient(135deg, #00ff88, #00aa55);"></span>
+                                        <span class="theme-name">EMERALD</span>
+                                    </button>
+                                </div>
                             </div>
                         </div>
                         
