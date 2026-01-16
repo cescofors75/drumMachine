@@ -90,11 +90,15 @@ function buildStepGrid() {
     
     grid.innerHTML = '';
     
-    // 8 tracks x 16 steps
+    // 8 tracks, cada uno con su fila de 16 steps
     for (let track = 0; track < MAX_TRACKS; track++) {
+        const trackRow = document.createElement('div');
+        trackRow.className = 'track-row';
+        trackRow.dataset.track = track;
+        
         for (let step = 0; step < MAX_STEPS; step++) {
             const cell = document.createElement('div');
-            cell.className = `step-cell track-${track + 1}`;
+            cell.className = 'step-cell';
             cell.dataset.track = track;
             cell.dataset.step = step;
             
@@ -103,8 +107,10 @@ function buildStepGrid() {
             
             cell.addEventListener('click', () => toggleStep(track, step));
             
-            grid.appendChild(cell);
+            trackRow.appendChild(cell);
         }
+        
+        grid.appendChild(trackRow);
     }
 }
 
@@ -162,6 +168,20 @@ function buildLivePads() {
         
         container.appendChild(pad);
     }
+}
+
+function selectTrack(trackNum) {
+    selectedTrack = trackNum;
+    
+    // Actualizar UI de track list
+    document.querySelectorAll('.track-item').forEach((item, idx) => {
+        item.classList.toggle('active', idx === trackNum);
+    });
+    
+    // Enviar al ESP32
+    sendCommand('/track', { track: trackNum });
+    
+    console.log(`Track ${trackNum + 1} selected: ${TRACK_NAMES[trackNum]}`);
 }
 
 // ============================================
@@ -231,6 +251,23 @@ function attachEventListeners() {
         alert('Record mode - Coming soon');
     });
     
+    // Loop y Hold controls
+    const btnLoop = document.getElementById('transportLoop');
+    const btnHold = document.getElementById('transportHold');
+    
+    if (btnLoop) btnLoop.addEventListener('click', () => {
+        btnLoop.classList.toggle('active');
+        const enabled = btnLoop.classList.contains('active');
+        sendCommand('/loop', { enabled: enabled ? 1 : 0 });
+        console.log('Loop:', enabled);
+    });
+    if (btnHold) btnHold.addEventListener('click', () => {
+        btnHold.classList.toggle('active');
+        const enabled = btnHold.classList.contains('active');
+        sendCommand('/hold', { enabled: enabled ? 1 : 0 });
+        console.log('Hold:', enabled);
+    });
+    
     // Tempo controls
     const btnTempoUp = document.getElementById('tempoUp');
     const btnTempoDown = document.getElementById('tempoDown');
@@ -242,7 +279,21 @@ function attachEventListeners() {
         sendCommand('/tempo', { delta: -5 });
     });
     
-    // Volume
+    // Volume controls en header
+    const btnVolumeUp = document.getElementById('volumeUp');
+    const btnVolumeDown = document.getElementById('volumeDown');
+    const volumeDisplayHeader = document.getElementById('volumeDisplayHeader');
+    
+    if (btnVolumeUp) btnVolumeUp.addEventListener('click', () => {
+        const newVol = Math.min(30, volume + 1);
+        sendCommand('/volume', { value: newVol });
+    });
+    if (btnVolumeDown) btnVolumeDown.addEventListener('click', () => {
+        const newVol = Math.max(0, volume - 1);
+        sendCommand('/volume', { value: newVol });
+    });
+    
+    // Volume slider en settings
     const volumeSlider = document.getElementById('volumeSlider');
     const volumeValue = document.getElementById('volumeValue');
     
@@ -527,6 +578,18 @@ function updateUIFromESP32(data) {
         selectedTrack = data.track;
         const headerTrack = document.getElementById('headerTrack');
         if (headerTrack) headerTrack.textContent = data.track + 1;
+    }
+    
+    // Volume
+    if (data.volume !== undefined) {
+        volume = data.volume;
+        const volumeDisplayHeader = document.getElementById('volumeDisplayHeader');
+        if (volumeDisplayHeader) volumeDisplayHeader.textContent = data.volume;
+        
+        const volumeSlider = document.getElementById('volumeSlider');
+        const volumeValue = document.getElementById('volumeValue');
+        if (volumeSlider) volumeSlider.value = data.volume;
+        if (volumeValue) volumeValue.textContent = data.volume;
     }
     
     // Connection OK
