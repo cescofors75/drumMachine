@@ -252,6 +252,7 @@ struct SampleInfo {
     bool isPlaying;
     int volume;
     SamplerMode mode;
+    unsigned long lastPlayTime;  // Para tracking de repetición en LOOP
     
     SampleInfo() : 
         name(""),
@@ -259,7 +260,8 @@ struct SampleInfo {
         isLooping(false),
         isPlaying(false),
         volume(DFPLAYER_VOLUME),
-        mode(SAMPLER_ONESHOT) {}
+        mode(SAMPLER_ONESHOT),
+        lastPlayTime(0) {}
 };
 
 struct DiagnosticInfo {
@@ -427,6 +429,7 @@ void setupDFPlayer();
 void playBootJingle();
 void testAllSamples();
 void playSample(int sampleNum);
+void playFromFolder(int folder, int file);
 void stopAllSamples();
 void toggleSampleLoop(int sampleNum);
 void changeSamplerMode(SamplerMode mode);
@@ -514,12 +517,24 @@ void setupPatterns() {
         }
     }
     
-    // Pattern 1: HOUSE
+    // Pattern 1: HOUSE (más profesional)
     patterns[0].name = "HOUSE";
+    // Track 0 (Kick): Four-on-floor
     for (int i = 0; i < MAX_STEPS; i += 4) patterns[0].steps[0][i] = true;
+    // Track 1 (Snare): beats 5 y 13
     patterns[0].steps[1][4] = true;
     patterns[0].steps[1][12] = true;
-    for (int i = 0; i < MAX_STEPS; i += 2) patterns[0].steps[2][i] = true;
+    // Track 2 (Closed HH): cada 2 steps (offbeat)
+    for (int i = 1; i < MAX_STEPS; i += 2) patterns[0].steps[2][i] = true;
+    // Track 3 (Open HH): acentos
+    patterns[0].steps[3][6] = true;
+    patterns[0].steps[3][14] = true;
+    // Track 4 (Clap): refuerzo de snare
+    patterns[0].steps[4][4] = true;
+    patterns[0].steps[4][12] = true;
+    // Track 5 (Tom): fills
+    patterns[0].steps[5][11] = true;
+    patterns[0].steps[5][15] = true;
     
     // Pattern 2: TECHNO
     patterns[1].name = "TECHNO";
@@ -1245,6 +1260,25 @@ void loop() {
         updateSequencer();
     }
     
+    // Mantener samples en loop (solo en modo LOOP)
+    if (currentScreen == SCREEN_LIVE && samplerInitialized && globalSamplerMode == SAMPLER_LOOP) {
+        for (int i = 0; i < MAX_SAMPLES; i++) {
+            if (samples[i].isLooping && samples[i].isPlaying) {
+                // Repetir sample cada ~2 segundos (ajustar según duración de tus samples)
+                if (currentTime - samples[i].lastPlayTime > 2000) {
+                    int folder = kits[currentKit].folder;
+                    playFromFolder(folder, i + 1);
+                    samples[i].lastPlayTime = currentTime;
+                    
+                    // Feedback LED
+                    setLED(i, true);
+                    ledActive[i] = true;
+                    ledOffTime[i] = currentTime + 100;
+                }
+            }
+        }
+    }
+    
     updateAudioVisualization();
     
     if (needsFullRedraw) {
@@ -1436,14 +1470,22 @@ void playSample(int sampleNum) {
     
     int fileNum = sampleNum + 1;  // 0->1, 1->2, etc.
     
-    // Reproducir desde carpeta /01/
-    playFromFolder(1, fileNum);
+    // Reproducir desde carpeta del kit actual
+    int folder = kits[currentKit].folder;
+    playFromFolder(folder, fileNum);
     
     lastSample = sampleNum;
     lastSampleTime = currentTime;
     
-    // Actualizar estado
+    // Actualizar estado según modo
     samples[sampleNum].isPlaying = true;
+    samples[sampleNum].mode = globalSamplerMode;
+    
+    // Si está en modo LOOP, activar flag de looping
+    if (globalSamplerMode == SAMPLER_LOOP) {
+        samples[sampleNum].isLooping = true;
+    }
+    
     lastPlayedSample = sampleNum;
     samplePlayTime = millis();
     
@@ -1456,7 +1498,9 @@ void playSample(int sampleNum) {
     char display[9];
     snprintf(display, 9, "SMP %d   ", fileNum);
     tm1.displayText(display);
-    snprintf(display, 9, "%s", samples[sampleNum].mode == SAMPLER_LOOP ? "LOOP    " : "ONESHOT ");
+    
+    const char* modeNames[] = {"ONESHOT", "LOOP   ", "HOLD   ", "REVERSE"};
+    snprintf(display, 9, "%-8s", modeNames[globalSamplerMode]);
     tm2.displayText(display);
 }
 
@@ -1491,6 +1535,7 @@ void stopAllSamples() {
     
     for (int i = 0; i < MAX_SAMPLES; i++) {
         samples[i].isPlaying = false;
+        samples[i].isLooping = false;  // Desactivar loops
     }
     
     setAllLEDs(0x0000);
@@ -1714,21 +1759,28 @@ void handleButtons() {
         }
     }
     
-    // Detectar botones mantenidos y repetir samples (solo en LIVE)
+    // Detectar botones mantenidos (solo en LIVE y modo HOLD)
     if (currentScreen == SCREEN_LIVE && samplerInitialized) {
         for (int i = 0; i < 8; i++) {
             if (buttons & (1 << i)) {
                 unsigned long pressedDuration = currentTime - buttonPressTime[i];
                 
-                if (pressedDuration > HOLD_THRESHOLD && 
-                    (currentTime - lastRepeatTime[i]) > REPEAT_INTERVAL) {
-                    
-                    playSample(i);
-                    lastRepeatTime[i] = currentTime;
-                    
-                    setLED(i, true);
-                    ledActive[i] = true;
-                    ledOffTime[i] = currentTime + 300;
+                // Modo HOLD: Repetir mientras está presionado
+                if (globalSamplerMode == SAMPLER_HOLD && pressedDuration > HOLD_THRESHOLD) {
+                    if ((currentTime - lastRepeatTime[i]) > REPEAT_INTERVAL) {
+                        playSample(i);
+                        lastRepeatTime[i] = currentTime;
+                        
+                        setLED(i, true);
+                        ledActive[i] = true;
+                        ledOffTime[i] = currentTime + 300;
+                    }
+                }
+            } else {
+                // Botón liberado: detener sample si está en modo HOLD
+                if (globalSamplerMode == SAMPLER_HOLD && samples[i].isPlaying) {
+                    samples[i].isPlaying = false;
+                    samples[i].isLooping = false;
                 }
             }
         }
@@ -1743,14 +1795,16 @@ void handleEncoder() {
     bool btn = digitalRead(ENCODER_SW);
     unsigned long currentTime = millis();
     
-    // Detectar si el botón del encoder está presionado (hold para BPM)
-    if (btn == LOW && !encoderBtnHeld) {
+    // Detectar si el botón del encoder está presionado
+    // LÓGICA INVERTIDA: HIGH = presionado (tu encoder específico)
+    if (btn == HIGH && !encoderBtnHeld) {
         encoderBtnHeld = true;
         encoderBtnPressTime = currentTime;
-    } else if (btn == HIGH) {
+    } else if (btn == LOW) {
         encoderBtnHeld = false;
     }
     
+    // isHolding = TRUE solo si está PRESIONADO más de 300ms
     bool isHolding = encoderBtnHeld && (currentTime - encoderBtnPressTime > 300);
     
     // Manejar rotación del encoder
@@ -1762,7 +1816,7 @@ void handleEncoder() {
         if (rawDelta != 0) {
             lastEncoderPos = currentPos;
             
-            // Si está en hold: ajustar BPM en cualquier pantalla
+            // SI ESTÁ EN HOLD: ajustar BPM en cualquier pantalla
             if (isHolding) {
                 int delta = rawDelta / 2;
                 if (delta != 0) {
@@ -1779,86 +1833,89 @@ void handleEncoder() {
                     Serial.printf("► BPM: %d (Encoder Hold)\n", tempo);
                 }
             }
-            // Modo normal según pantalla
-            else if (currentScreen == SCREEN_MENU) {
-                // En menú: sensibilidad media (dividir por 2)
-                int delta = rawDelta / 2;
-                if (delta != 0) {
-                    int oldSelection = menuSelection;
-                    menuSelection += delta;
-                    if (menuSelection < 0) menuSelection = menuItemCount - 1;
-                    if (menuSelection >= menuItemCount) menuSelection = 0;
-                    
-                    // Solo redibujar items que cambiaron
-                    if (oldSelection != menuSelection) {
-                        drawMenuItems(oldSelection, menuSelection);
-                    }
-                    Serial.printf("► Menu: %d\n", menuSelection);
-                }
-                
-            } else if (currentScreen == SCREEN_SETTINGS) {
-                // En settings: ajustar BPM (tempo)
-                int delta = rawDelta / 3;
-                if (delta != 0) {
-                    changeTempo(delta * 5);  // Cambios de 5 en 5 BPM
-                    needsHeaderUpdate = true;
-                    showBPMOnTM1638();
-                    Serial.printf("► BPM: %d\n", tempo);
-                }
-                
-            } else if (currentScreen == SCREEN_SEQUENCER) {
-                // En sequencer: más sensible (dividir por 2 para precisión perfecta)
-                int delta = rawDelta / 2;
-                if (delta != 0) {
-                    selectedTrack += delta;
-                    if (selectedTrack < 0) selectedTrack = MAX_TRACKS - 1;
-                    if (selectedTrack >= MAX_TRACKS) selectedTrack = 0;
-                    
-                    // Mostrar instrumento en TM1638
-                    showInstrumentOnTM1638(selectedTrack);
-                    
-                    // Actualizar LEDs para mostrar steps del track seleccionado
-                    if (!isPlaying) {
-                        updateStepLEDsForTrack(selectedTrack);
+            // SIN HOLD: navegación normal según pantalla
+            else {
+                if (currentScreen == SCREEN_MENU) {
+                    // En menú: sensibilidad media (dividir por 2)
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        int oldSelection = menuSelection;
+                        menuSelection += delta;
+                        if (menuSelection < 0) menuSelection = menuItemCount - 1;
+                        if (menuSelection >= menuItemCount) menuSelection = 0;
+                        
+                        // Solo redibujar items que cambiaron
+                        if (oldSelection != menuSelection) {
+                            drawMenuItems(oldSelection, menuSelection);
+                        }
+                        Serial.printf("► Menu: %d\n", menuSelection);
                     }
                     
-                    needsHeaderUpdate = true;
-                    Serial.printf("► Track: %d (%s)\n", selectedTrack, trackNames[selectedTrack]);
+                } else if (currentScreen == SCREEN_SETTINGS) {
+                    // En settings: navegar entre opciones (Drum Kits, Themes, etc.)
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        // Navegar por drum kits con el encoder
+                        changeKit(delta);
+                        Serial.printf("► Kit: %d\n", currentKit);
+                    }
+                    
+                } else if (currentScreen == SCREEN_SEQUENCER) {
+                    // En sequencer: más sensible (dividir por 2 para precisión perfecta)
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        selectedTrack += delta;
+                        if (selectedTrack < 0) selectedTrack = MAX_TRACKS - 1;
+                        if (selectedTrack >= MAX_TRACKS) selectedTrack = 0;
+                        
+                        // Mostrar instrumento en TM1638
+                        showInstrumentOnTM1638(selectedTrack);
+                        
+                        // Actualizar LEDs para mostrar steps del track seleccionado
+                        if (!isPlaying) {
+                            updateStepLEDsForTrack(selectedTrack);
+                        }
+                        
+                        needsHeaderUpdate = true;
+                        Serial.printf("► Track: %d (%s)\n", selectedTrack, trackNames[selectedTrack]);
+                    }
                 }
             }
         }
     }
     
     // Manejar botón del encoder (solo click corto, no hold)
-    static bool lastBtn = HIGH;
+    static bool lastBtn = LOW;
     static unsigned long lastBtnTime = 0;
     
     // Detectar click corto (liberación rápida)
-    if (btn == HIGH && lastBtn == LOW) {
+    // LÓGICA INVERTIDA: LOW cuando suelta (HIGH era presionado)
+    if (btn == LOW && lastBtn == HIGH) {
         unsigned long pressDuration = currentTime - encoderBtnPressTime;
         
         if (pressDuration < 300 && (currentTime - lastBtnTime > 50)) {
             lastBtnTime = currentTime;
             Serial.println("► ENCODER BTN (ENTER)");
-        
-        if (currentScreen == SCREEN_MENU) {
-            // En menú: Enter selecciona opción
-            switch (menuSelection) {
-                case 0: changeScreen(SCREEN_LIVE); break;
-                case 1: changeScreen(SCREEN_SEQUENCER); break;
-                case 2: changeScreen(SCREEN_SETTINGS); break;
-                case 3: changeScreen(SCREEN_DIAGNOSTICS); break;
-            }
             
-        } else if (currentScreen == SCREEN_SEQUENCER) {
-            // En sequencer: Play/Stop
-            isPlaying = !isPlaying;
-            if (!isPlaying) {
-                currentStep = 0;
-                setAllLEDs(0x0000);
-                updateStepLEDsForTrack(selectedTrack);
+            if (currentScreen == SCREEN_MENU) {
+                // En menú: Enter selecciona opción
+                switch (menuSelection) {
+                    case 0: changeScreen(SCREEN_LIVE); break;
+                    case 1: changeScreen(SCREEN_SEQUENCER); break;
+                    case 2: changeScreen(SCREEN_SETTINGS); break;
+                    case 3: changeScreen(SCREEN_DIAGNOSTICS); break;
+                }
+                
+            } else if (currentScreen == SCREEN_SEQUENCER) {
+                // En sequencer: Play/Stop
+                isPlaying = !isPlaying;
+                if (!isPlaying) {
+                    currentStep = 0;
+                    setAllLEDs(0x0000);
+                    updateStepLEDsForTrack(selectedTrack);
+                }
+                needsFullRedraw = true;
             }
-            needsFullRedraw = true;
         }
     }
     lastBtn = btn;
