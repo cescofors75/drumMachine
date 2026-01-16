@@ -309,11 +309,14 @@ int currentPattern = 0;
 int currentKit = 0;
 int currentStep = 0;
 int tempo = DEFAULT_BPM;
+int volume = DEFAULT_VOLUME;
 unsigned long lastStepTime = 0;
 unsigned long stepInterval = 0;
 bool isPlaying = false;
 
 // Servidor Web WiFi
+const char* ssid = "RED808";
+const char* password = "12345678";
 AsyncWebServer server(80);
 bool webServerEnabled = false;
 
@@ -564,6 +567,37 @@ void setupPatterns() {
 
 void calculateStepInterval() {
     stepInterval = (60000 / tempo) / 4;
+}
+
+void enableWebServer() {
+    if (!webServerEnabled) {
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(ssid, password);
+        server.begin();
+        webServerEnabled = true;
+        needsHeaderUpdate = true;
+        Serial.println("► WiFi y Servidor Web ACTIVADOS");
+        Serial.printf("► IP Address: %s\n", WiFi.softAPIP().toString().c_str());
+    }
+}
+
+void disableWebServer() {
+    if (webServerEnabled) {
+        server.end();
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_OFF);
+        webServerEnabled = false;
+        needsHeaderUpdate = true;
+        Serial.println("► WiFi y Servidor Web DESACTIVADOS");
+    }
+}
+
+void toggleWebServer() {
+    if (webServerEnabled) {
+        disableWebServer();
+    } else {
+        enableWebServer();
+    }
 }
 /*
 void setupSDCard() {
@@ -1754,12 +1788,21 @@ void handleButtons() {
                 }
             } else if (currentScreen == SCREEN_SETTINGS) {
                 if (i >= 0 && i < MAX_KITS) {
+                    // S1-S3: Cambiar kit
                     changeKit(i - currentKit);
                     drawSettingsScreen();
-                } else if (i >= 4 && i < 4 + THEME_COUNT) {
-                    int newTheme = i - 4;
-                    changeTheme(newTheme - currentTheme);
+                } else if (i == 3) {
+                    // S4: Toggle WiFi
+                    toggleWebServer();
                     drawSettingsScreen();
+                    Serial.printf("► WiFi %s desde Settings (S4)\n", webServerEnabled ? "activado" : "desactivado");
+                } else if (i >= 4 && i < 4 + THEME_COUNT && (i - 4) < THEME_COUNT) {
+                    // S5-S7: Cambiar theme
+                    int newTheme = i - 4;
+                    if (newTheme != currentTheme) {
+                        changeTheme(newTheme - currentTheme);
+                        drawSettingsScreen();
+                    }
                 }
             } else if (currentScreen == SCREEN_SEQUENCER) {
                 // Permitir edición en tiempo real incluso en play
@@ -2569,11 +2612,6 @@ void drawMainMenu() {
         tft.setCursor(50, y + (i == menuSelection ? 12 : 14));
         tft.print(menuItems[i]);
     }
-    
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(150, 305);
-    tft.println("ENCODER: SELECT  |  BTN: CONFIRM");
 }
 
 // Función optimizada para solo actualizar items del menú sin parpadeo
@@ -3008,24 +3046,78 @@ void drawSettingsScreen() {
         tft.print(theme->name);
     }
     
+    // ========== SECCIÓN WIFI COMPACTA (debajo de themes) ==========
+    const int wifiY = sectionY + 220;
+    
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.setCursor(rightX, wifiY - 8);
+    tft.print("WIFI / WEB");
+    
+    // Box compacto
+    uint16_t wifiBg = webServerEnabled ? COLOR_PRIMARY_LIGHT : COLOR_BG;
+    uint16_t wifiBorder = webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR;
+    tft.fillRoundRect(rightX, wifiY, 200, 32, 6, wifiBg);
+    tft.drawRoundRect(rightX, wifiY, 200, 32, 6, wifiBorder);
+    
+    int iconX = rightX + 12;
+    int iconY = wifiY + 16;
+    
+    if (webServerEnabled) {
+        // Icono WiFi ON
+        tft.fillCircle(iconX, iconY, 2, COLOR_SUCCESS);
+        tft.drawArc(iconX, iconY, 5, 3, 210, 330, COLOR_SUCCESS, wifiBg);
+        tft.drawArc(iconX, iconY, 9, 7, 210, 330, COLOR_SUCCESS, wifiBg);
+        
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_SUCCESS);
+        tft.setCursor(iconX + 16, iconY - 8);
+        tft.print("ON");
+        
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(iconX + 50, iconY - 4);
+        tft.print("192.168.4.1");
+    } else {
+        // X roja OFF
+        tft.drawLine(iconX - 3, iconY - 3, iconX + 3, iconY + 3, COLOR_ERROR);
+        tft.drawLine(iconX + 3, iconY - 3, iconX - 3, iconY + 3, COLOR_ERROR);
+        
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_ERROR);
+        tft.setCursor(iconX + 16, iconY - 8);
+        tft.print("OFF");
+        
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(iconX + 52, iconY - 4);
+        tft.print("Disabled");
+    }
+    
     // Footer con instrucciones
     tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(20, 305);
-    tft.print("S1-S3: KIT");
-    tft.setCursor(110, 305);
+    tft.setCursor(10, 305);
+    tft.print("S1-S3:KIT");
+    tft.setCursor(85, 305);
     tft.print("|");
-    tft.setCursor(125, 305);
-    tft.print("S5-S8: THEME");
-    tft.setCursor(235, 305);
+    tft.setCursor(93, 305);
+    tft.setTextColor(webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR);
+    tft.print("S4:WiFi");
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(155, 305);
     tft.print("|");
-    tft.setCursor(250, 305);
-    tft.print("ENCODER: BPM");
-    tft.setCursor(360, 305);
+    tft.setCursor(163, 305);
+    tft.print("S5-S7:THEME");
+    tft.setCursor(258, 305);
     tft.print("|");
-    tft.setCursor(375, 305);
-    tft.print("BACK: MENU");
+    tft.setCursor(266, 305);
+    tft.print("ENC:KIT");
+    tft.setCursor(333, 305);
+    tft.print("|");
+    tft.setCursor(341, 305);
+    tft.print("BACK:MENU");
 }
 
 
@@ -3128,6 +3220,32 @@ void drawHeader() {
         String instName = String(instrumentNames[selectedTrack]);
         instName.trim();
         tft.print(instName.c_str());
+    }
+    
+    // Mostrar clientes WiFi conectados con icono (parte superior derecha)
+    if (webServerEnabled) {
+        int clients = WiFi.softAPgetStationNum();
+        
+        // Icono WiFi (3 arcos)
+        uint16_t wifiColor = clients > 0 ? COLOR_SUCCESS : COLOR_ACCENT;
+        tft.drawCircle(400, 26, 2, wifiColor);  // Centro
+        tft.drawArc(400, 26, 6, 3, 210, 330, wifiColor, COLOR_BG);  // Arco 1
+        tft.drawArc(400, 26, 10, 8, 210, 330, wifiColor, COLOR_BG); // Arco 2
+        
+        // Número de clientes
+        tft.setTextSize(2);
+        tft.setTextColor(clients > 0 ? COLOR_SUCCESS : COLOR_TEXT_DIM);
+        tft.setCursor(415, 14);
+        tft.printf("%d", clients);
+    } else {
+        // WiFi desactivado - icono con X roja
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_ERROR);
+        tft.setCursor(390, 18);
+        tft.print("WiFi OFF");
+        // Dibujar X
+        tft.drawLine(398, 8, 408, 18, COLOR_ERROR);
+        tft.drawLine(408, 8, 398, 18, COLOR_ERROR);
     }
     
     if (isPlaying) {
@@ -3518,6 +3636,146 @@ void setupWebServer() {
         }
         
         json += "]}";
+        request->send(200, "application/json", json);
+    });
+    
+    // ========== NUEVOS ENDPOINTS ==========
+    // Control de volumen
+    server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("value")) {
+            int newVolume = request->getParam("value")->value().toInt();
+            volume = constrain(newVolume, 0, 30);
+            // Aplicar volumen al DFPlayer si está disponible
+            Serial.printf("► VOLUME set: %d (Web)\n", volume);
+        }
+        request->send(200, "application/json", "{\"volume\":" + String(volume) + "}");
+    });
+    
+    // Clear track (borrar todos los steps de un track)
+    server.on("/clear", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("track")) {
+            int track = request->getParam("track")->value().toInt();
+            if (track >= 0 && track < MAX_TRACKS) {
+                for (int step = 0; step < MAX_STEPS; step++) {
+                    patterns[currentPattern].steps[track][step] = false;
+                }
+                needsGridUpdate = true;
+                Serial.printf("► TRACK %d cleared (Web)\n", track + 1);
+            }
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    
+    // Mute track (silenciar track - solo visual por ahora)
+    server.on("/mute", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("track")) {
+            int track = request->getParam("track")->value().toInt();
+            if (track >= 0 && track < MAX_TRACKS) {
+                // Toggle mute (implementar lógica si es necesario)
+                Serial.printf("► TRACK %d mute toggled (Web)\n", track + 1);
+            }
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    
+    // Copy pattern
+    server.on("/copy", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("from") && request->hasParam("to")) {
+            int fromPattern = request->getParam("from")->value().toInt();
+            int toPattern = request->getParam("to")->value().toInt();
+            
+            if (fromPattern >= 0 && fromPattern < MAX_PATTERNS && 
+                toPattern >= 0 && toPattern < MAX_PATTERNS) {
+                
+                // Copiar todos los steps
+                for (int track = 0; track < MAX_TRACKS; track++) {
+                    for (int step = 0; step < MAX_STEPS; step++) {
+                        patterns[toPattern].steps[track][step] = 
+                            patterns[fromPattern].steps[track][step];
+                    }
+                }
+                
+                Serial.printf("► PATTERN %d copied to %d (Web)\n", fromPattern + 1, toPattern + 1);
+            }
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    
+    // Trigger sample (para Live Pads)
+    server.on("/trigger", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("track")) {
+            int track = request->getParam("track")->value().toInt();
+            if (track >= 0 && track < MAX_TRACKS) {
+                // Reproducir sample
+                playSample(track);
+                Serial.printf("► SAMPLE %d triggered (Web)\n", track + 1);
+            }
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    
+    // ========== ENDPOINTS DE DIAGNÓSTICO ==========
+    // Información completa del sistema
+    server.on("/diagnostic", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{";
+        
+        // WiFi Stats
+        json += "\"wifi\":{";
+        json += "\"ssid\":\"" + String(WiFi.softAPSSID()) + "\"";
+        json += ",\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
+        json += ",\"clients\":" + String(WiFi.softAPgetStationNum());
+        json += ",\"mac\":\"" + WiFi.softAPmacAddress() + "\"";
+        json += ",\"channel\":" + String(WiFi.channel());
+        json += "},";
+        
+        // System Info
+        json += "\"system\":{";
+        json += "\"uptime\":" + String(millis() / 1000);
+        json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
+        json += ",\"heapSize\":" + String(ESP.getHeapSize());
+        json += ",\"chipModel\":\"" + String(ESP.getChipModel()) + "\"";
+        json += ",\"cpuFreq\":" + String(ESP.getCpuFreqMHz());
+        json += ",\"flashSize\":" + String(ESP.getFlashChipSize());
+        json += "},";
+        
+        // Filesystem Info
+        json += "\"filesystem\":{";
+        json += "\"totalBytes\":" + String(LittleFS.totalBytes());
+        json += ",\"usedBytes\":" + String(LittleFS.usedBytes());
+        json += ",\"mounted\":" + String(LittleFS.begin() ? "true" : "false");
+        json += "},";
+        
+        // Hardware Status
+        json += "\"hardware\":{";
+        json += "\"tft\":" + String(diagnostic.tftOk ? "true" : "false");
+        json += ",\"tm1638_1\":" + String(diagnostic.tm1638_1_Ok ? "true" : "false");
+        json += ",\"tm1638_2\":" + String(diagnostic.tm1638_2_Ok ? "true" : "false");
+        json += ",\"encoder\":" + String(diagnostic.encoderOk ? "true" : "false");
+        json += ",\"dfplayer\":" + String(diagnostic.dfplayerOk ? "true" : "false");
+        json += "},";
+        
+        // RED808 Status
+        json += "\"red808\":{";
+        json += "\"version\":\"V5\"";
+        json += ",\"bpm\":" + String(tempo);
+        json += ",\"pattern\":" + String(currentPattern);
+        json += ",\"kit\":" + String(currentKit);
+        json += ",\"playing\":" + String(isPlaying ? "true" : "false");
+        json += ",\"volume\":" + String(volume);
+        json += "}";
+        
+        json += "}";
+        request->send(200, "application/json", json);
+    });
+    
+    // Info de sistema simplificada
+    server.on("/system-info", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{";
+        json += "\"uptime\":" + String(millis() / 1000);
+        json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
+        json += ",\"wifiClients\":" + String(WiFi.softAPgetStationNum());
+        json += ",\"version\":\"RED808 V5\"";
+        json += "}";
         request->send(200, "application/json", json);
     });
     
