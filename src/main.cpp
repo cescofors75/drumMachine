@@ -5,6 +5,8 @@
 //#include <RotaryEncoder.h>
 #include <SD.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
 
 // ============================================
 // PIN DEFINITIONS
@@ -310,6 +312,10 @@ unsigned long lastStepTime = 0;
 unsigned long stepInterval = 0;
 bool isPlaying = false;
 
+// Servidor Web WiFi
+AsyncWebServer server(80);
+bool webServerEnabled = false;
+
 int selectedTrack = 0;
 int selectedStep = 0;
 int menuSelection = 0;
@@ -453,6 +459,7 @@ void updateStepLEDsForTrack(int track);
 void updateLEDFeedback();
 void updateAudioVisualization();
 void changeTempo(int delta);
+void setupWebServer();
 void changePattern(int delta);
 void changeKit(int delta);
 void changeTheme(int delta);
@@ -1095,6 +1102,9 @@ void setup() {
     tft.fillScreen(COLOR_BG);
     diagnostic.tftOk = true;
     Serial.println("OK (480x320)");
+    
+    // Servidor Web WiFi (opcional - comentar si no se necesita)
+    setupWebServer();
     
     // TM1638 #1
     Serial.print("► TM1638 #1 Init... ");
@@ -3304,4 +3314,104 @@ void toggleStep(int track, int step) {
     Serial.printf("► TOGGLE: Track %d, Step %d = %s\n", 
                   track, step, 
                   patterns[currentPattern].steps[track][step] ? "ON" : "OFF");
+}
+
+// ============================================
+// SERVIDOR WEB ASYNC - MONITOREO RED808
+// ============================================
+void setupWebServer() {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("RED808", "12345678");
+    
+    Serial.println("► WiFi AP configurado: RED808");
+    Serial.print("► IP Address: ");
+    Serial.println(WiFi.softAPIP());
+    
+    // Endpoint JSON - Estado del sistema
+    server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{\"bpm\":" + String(tempo) + 
+                      ",\"pattern\":" + String(currentPattern) +
+                      ",\"kit\":" + String(currentKit) +
+                      ",\"playing\":" + String(isPlaying ? "true" : "false") + 
+                      ",\"step\":" + String(currentStep) +
+                      ",\"track\":" + String(selectedTrack) +
+                      ",\"kitName\":\"" + kits[currentKit].name + "\"}";
+        request->send(200, "application/json", json);
+    });
+    
+    // Página HTML - Dashboard visual
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        String html = "<html><head>";
+        html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+        html += "<style>";
+        html += "body{font-family:monospace;background:#000;color:#f00;padding:20px;margin:0}";
+        html += "h1{border-bottom:2px solid #f00;padding-bottom:10px;text-align:center}";
+        html += ".card{background:#1a0000;border:1px solid #f00;padding:15px;margin:10px 0;border-radius:5px}";
+        html += ".label{color:#ff6666;font-size:14px}";
+        html += ".value{color:#fff;font-size:24px;font-weight:bold}";
+        html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}";
+        html += "@media(max-width:600px){.grid{grid-template-columns:1fr}}";
+        html += "</style>";
+        html += "</head><body>";
+        
+        html += "<h1>► RED808 STATUS ◄</h1>";
+        
+        html += "<div class='grid'>";
+        
+        // BPM
+        html += "<div class='card'>";
+        html += "<div class='label'>BPM</div>";
+        html += "<div class='value'>" + String(tempo) + "</div>";
+        html += "</div>";
+        
+        // Estado Play/Stop
+        html += "<div class='card'>";
+        html += "<div class='label'>STATUS</div>";
+        html += "<div class='value' style='color:" + String(isPlaying ? "#0f0" : "#f00") + "'>";
+        html += isPlaying ? "► PLAYING" : "■ STOPPED";
+        html += "</div></div>";
+        
+        // Pattern
+        html += "<div class='card'>";
+        html += "<div class='label'>PATTERN</div>";
+        html += "<div class='value'>" + String(currentPattern + 1) + " / " + String(MAX_PATTERNS) + "</div>";
+        html += "</div>";
+        
+        // Current Step
+        html += "<div class='card'>";
+        html += "<div class='label'>STEP</div>";
+        html += "<div class='value'>" + String(currentStep + 1) + " / " + String(MAX_STEPS) + "</div>";
+        html += "</div>";
+        
+        // Kit
+        html += "<div class='card'>";
+        html += "<div class='label'>KIT</div>";
+        html += "<div class='value'>" + kits[currentKit].name + "</div>";
+        html += "</div>";
+        
+        // Track
+        html += "<div class='card'>";
+        html += "<div class='label'>TRACK</div>";
+        html += "<div class='value'>" + String(selectedTrack + 1) + " / " + String(MAX_TRACKS) + "</div>";
+        html += "</div>";
+        
+        html += "</div>"; // Cierra grid
+        
+        // Auto-refresh cada 2 segundos
+        html += "<script>setInterval(()=>location.reload(),2000)</script>";
+        html += "</body></html>";
+        
+        request->send(200, "text/html", html);
+    });
+    
+    // Endpoint para activar/desactivar playback
+    server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request){
+        isPlaying = !isPlaying;
+        String response = "{\"playing\":" + String(isPlaying ? "true" : "false") + "}";
+        request->send(200, "application/json", response);
+    });
+    
+    server.begin();
+    webServerEnabled = true;
+    Serial.println("► WebServer INICIADO en http://" + WiFi.softAPIP().toString());
 }
