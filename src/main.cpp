@@ -7,6 +7,7 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <LittleFS.h>
 
 // ============================================
 // PIN DEFINITIONS
@@ -3320,6 +3321,28 @@ void toggleStep(int track, int step) {
 // SERVIDOR WEB ASYNC - MONITOREO RED808
 // ============================================
 void setupWebServer() {
+    // Inicializar LittleFS
+    bool fsOK = LittleFS.begin(true);
+    if (!fsOK) {
+        Serial.println("✗ Error montando LittleFS - servidor continuará sin archivos");
+    } else {
+        Serial.println("► LittleFS montado correctamente");
+        
+        // Listar archivos para debug
+        File root = LittleFS.open("/");
+        File file = root.openNextFile();
+        Serial.println("► Archivos en LittleFS:");
+        while(file) {
+            Serial.print("  - ");
+            Serial.print(file.name());
+            Serial.print(" (");
+            Serial.print(file.size());
+            Serial.println(" bytes)");
+            file = root.openNextFile();
+        }
+    }
+    
+    // Configurar WiFi AP
     WiFi.mode(WIFI_AP);
     WiFi.softAP("RED808", "12345678");
     
@@ -3327,91 +3350,180 @@ void setupWebServer() {
     Serial.print("► IP Address: ");
     Serial.println(WiFi.softAPIP());
     
-    // Endpoint JSON - Estado del sistema
+    // ========== ARCHIVOS ESTÁTICOS ==========
+    if (fsOK) {
+        // Servir index.html desde LittleFS
+        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+            if (LittleFS.exists("/index.html")) {
+                request->send(LittleFS, "/index.html", "text/html");
+            } else {
+                request->send(404, "text/plain", "index.html no encontrado");
+            }
+        });
+        
+        // Servir CSS
+        server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request){
+            if (LittleFS.exists("/style.css")) {
+                request->send(LittleFS, "/style.css", "text/css");
+            } else {
+                request->send(404, "text/plain", "style.css no encontrado");
+            }
+        });
+        
+        // Servir JavaScript
+        server.on("/script.js", HTTP_GET, [](AsyncWebServerRequest *request){
+            if (LittleFS.exists("/script.js")) {
+                request->send(LittleFS, "/script.js", "application/javascript");
+            } else {
+                request->send(404, "text/plain", "script.js no encontrado");
+            }
+        });
+    } else {
+        // Fallback: página de error si LittleFS falló
+        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+            String html = "<html><body style='font-family:monospace;background:#000;color:#f00;padding:40px'>";
+            html += "<h1>ERROR: LittleFS no montado</h1>";
+            html += "<p>Los archivos web no se subieron correctamente.</p>";
+            html += "<p>Ejecuta: <code>pio run --target uploadfs</code></p>";
+            html += "</body></html>";
+            request->send(200, "text/html", html);
+        });
+    }
+    
+    // ========== ENDPOINTS DE STATUS ==========
+    // Estado completo del sistema (JSON)
     server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
-        String json = "{\"bpm\":" + String(tempo) + 
-                      ",\"pattern\":" + String(currentPattern) +
-                      ",\"kit\":" + String(currentKit) +
-                      ",\"playing\":" + String(isPlaying ? "true" : "false") + 
-                      ",\"step\":" + String(currentStep) +
-                      ",\"track\":" + String(selectedTrack) +
-                      ",\"kitName\":\"" + kits[currentKit].name + "\"}";
+        String json = "{";
+        json += "\"bpm\":" + String(tempo);
+        json += ",\"pattern\":" + String(currentPattern);
+        json += ",\"kit\":" + String(currentKit);
+        json += ",\"playing\":" + String(isPlaying ? "true" : "false");
+        json += ",\"step\":" + String(currentStep);
+        json += ",\"track\":" + String(selectedTrack);
+        json += ",\"kitName\":\"" + kits[currentKit].name + "\"";
+        json += ",\"time\":" + String(millis() / 1000.0, 1);
+        json += "}";
         request->send(200, "application/json", json);
     });
     
-    // Página HTML - Dashboard visual
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-        String html = "<html><head>";
-        html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-        html += "<style>";
-        html += "body{font-family:monospace;background:#000;color:#f00;padding:20px;margin:0}";
-        html += "h1{border-bottom:2px solid #f00;padding-bottom:10px;text-align:center}";
-        html += ".card{background:#1a0000;border:1px solid #f00;padding:15px;margin:10px 0;border-radius:5px}";
-        html += ".label{color:#ff6666;font-size:14px}";
-        html += ".value{color:#fff;font-size:24px;font-weight:bold}";
-        html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}";
-        html += "@media(max-width:600px){.grid{grid-template-columns:1fr}}";
-        html += "</style>";
-        html += "</head><body>";
-        
-        html += "<h1>► RED808 STATUS ◄</h1>";
-        
-        html += "<div class='grid'>";
-        
-        // BPM
-        html += "<div class='card'>";
-        html += "<div class='label'>BPM</div>";
-        html += "<div class='value'>" + String(tempo) + "</div>";
-        html += "</div>";
-        
-        // Estado Play/Stop
-        html += "<div class='card'>";
-        html += "<div class='label'>STATUS</div>";
-        html += "<div class='value' style='color:" + String(isPlaying ? "#0f0" : "#f00") + "'>";
-        html += isPlaying ? "► PLAYING" : "■ STOPPED";
-        html += "</div></div>";
-        
-        // Pattern
-        html += "<div class='card'>";
-        html += "<div class='label'>PATTERN</div>";
-        html += "<div class='value'>" + String(currentPattern + 1) + " / " + String(MAX_PATTERNS) + "</div>";
-        html += "</div>";
-        
-        // Current Step
-        html += "<div class='card'>";
-        html += "<div class='label'>STEP</div>";
-        html += "<div class='value'>" + String(currentStep + 1) + " / " + String(MAX_STEPS) + "</div>";
-        html += "</div>";
-        
-        // Kit
-        html += "<div class='card'>";
-        html += "<div class='label'>KIT</div>";
-        html += "<div class='value'>" + kits[currentKit].name + "</div>";
-        html += "</div>";
-        
-        // Track
-        html += "<div class='card'>";
-        html += "<div class='label'>TRACK</div>";
-        html += "<div class='value'>" + String(selectedTrack + 1) + " / " + String(MAX_TRACKS) + "</div>";
-        html += "</div>";
-        
-        html += "</div>"; // Cierra grid
-        
-        // Auto-refresh cada 2 segundos
-        html += "<script>setInterval(()=>location.reload(),2000)</script>";
-        html += "</body></html>";
-        
-        request->send(200, "text/html", html);
+    // ========== ENDPOINTS DE CONTROL ==========
+    // Play/Stop
+    server.on("/play", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (!isPlaying) {
+            isPlaying = true;
+            Serial.println("► PLAY (Web)");
+        }
+        request->send(200, "application/json", "{\"status\":\"playing\"}");
     });
     
-    // Endpoint para activar/desactivar playback
+    server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (isPlaying) {
+            isPlaying = false;
+            stopAllSamples();
+            currentStep = 0;
+            setAllLEDs(0x0000);
+            Serial.println("► STOP (Web)");
+        }
+        request->send(200, "application/json", "{\"status\":\"stopped\"}");
+    });
+    
+    // Toggle Play/Stop
     server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request){
         isPlaying = !isPlaying;
+        if (!isPlaying) {
+            stopAllSamples();
+            currentStep = 0;
+            setAllLEDs(0x0000);
+        }
         String response = "{\"playing\":" + String(isPlaying ? "true" : "false") + "}";
         request->send(200, "application/json", response);
     });
     
+    // Cambiar Tempo
+    server.on("/tempo", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("delta")) {
+            int delta = request->getParam("delta")->value().toInt();
+            changeTempo(delta);
+            Serial.printf("► TEMPO changed: %d BPM (Web)\n", tempo);
+        } else if (request->hasParam("value")) {
+            int newTempo = request->getParam("value")->value().toInt();
+            tempo = constrain(newTempo, MIN_BPM, MAX_BPM);
+            stepInterval = (60000 / tempo) / 4;
+            Serial.printf("► TEMPO set: %d BPM (Web)\n", tempo);
+        }
+        request->send(200, "application/json", "{\"bpm\":" + String(tempo) + "}");
+    });
+    
+    // Cambiar Pattern
+    server.on("/pattern", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("pattern")) {
+            int newPattern = request->getParam("pattern")->value().toInt();
+            if (newPattern >= 0 && newPattern < MAX_PATTERNS) {
+                changePattern(newPattern - currentPattern);
+                Serial.printf("► PATTERN changed: %d (Web)\n", currentPattern + 1);
+            }
+        }
+        request->send(200, "application/json", "{\"pattern\":" + String(currentPattern) + "}");
+    });
+    
+    // Cambiar Kit
+    server.on("/kit", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("kit")) {
+            int newKit = request->getParam("kit")->value().toInt();
+            if (newKit >= 0 && newKit < MAX_KITS) {
+                changeKit(newKit - currentKit);
+                Serial.printf("► KIT changed: %s (Web)\n", kits[currentKit].name.c_str());
+            }
+        }
+        request->send(200, "application/json", "{\"kit\":" + String(currentKit) + "}");
+    });
+    
+    // Toggle Step (Control bidireccional del sequencer)
+    server.on("/step", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("track") && request->hasParam("step")) {
+            int track = request->getParam("track")->value().toInt();
+            int step = request->getParam("step")->value().toInt();
+            
+            if (track >= 0 && track < MAX_TRACKS && step >= 0 && step < MAX_STEPS) {
+                // Si se especifica valor, usarlo; sino, toggle
+                if (request->hasParam("value")) {
+                    int value = request->getParam("value")->value().toInt();
+                    patterns[currentPattern].steps[track][step] = (value != 0);
+                } else {
+                    patterns[currentPattern].steps[track][step] = 
+                        !patterns[currentPattern].steps[track][step];
+                }
+                
+                needsGridUpdate = true;
+                Serial.printf("► STEP toggled: T%d S%d = %s (Web)\n", 
+                              track, step, 
+                              patterns[currentPattern].steps[track][step] ? "ON" : "OFF");
+            }
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    
+    // Endpoint para obtener pattern completo
+    server.on("/getpattern", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{\"pattern\":" + String(currentPattern) + ",\"data\":[";
+        
+        for (int track = 0; track < MAX_TRACKS; track++) {
+            json += "[";
+            for (int step = 0; step < MAX_STEPS; step++) {
+                json += patterns[currentPattern].steps[track][step] ? "1" : "0";
+                if (step < MAX_STEPS - 1) json += ",";
+            }
+            json += "]";
+            if (track < MAX_TRACKS - 1) json += ",";
+        }
+        
+        json += "]}";
+        request->send(200, "application/json", json);
+    });
+    
+    // Iniciar servidor
     server.begin();
     webServerEnabled = true;
     Serial.println("► WebServer INICIADO en http://" + WiFi.softAPIP().toString());
+    Serial.println("► Interfaz web profesional disponible");
 }

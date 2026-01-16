@@ -9,6 +9,13 @@
 				"$platformio"
 			],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Upload Filesystem",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --target uploadfs",
+			"problemMatcher": [],
+			"group": "build"
 		}
 	]
 }
