@@ -1,11 +1,11 @@
 // RED808 Web Interface - Professional Drum Machine
 // Sincronización bidireccional completa
 
-const TRACK_NAMES = ['KICK', 'SNARE', 'CLHAT', 'OPHAT', 'CLAP', 'TOMLO', 'TOMHI', 'CYMBAL'];
+const TRACK_NAMES = ['KICK', 'SNARE', 'CLHAT', 'OPHAT', 'CLAP', 'TOMLO', 'TOMHI', 'CYMBAL', 'PERCUSS', 'COWBELL', 'MARACAS', 'WHISTLE', 'CRASH', 'RIDE', 'CLAVES', 'RIMSHOT'];
 const KIT_NAMES = ['808 CLASSIC', '808 BRIGHT', '808 DRY'];
 const THEME_NAMES = ['RED808', 'NAVY', 'CYBER', 'EMERALD'];
 const MAX_STEPS = 16;
-const MAX_TRACKS = 8;
+const MAX_TRACKS = 16;
 const MAX_PATTERNS = 16;
 
 let currentPattern = 0;

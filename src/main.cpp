@@ -1,13 +1,12 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <TM1638plus.h>
-#include <HardwareSerial.h>
-//#include <RotaryEncoder.h>
-#include <SD.h>
-#include <SPI.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
+#include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
+#include <FS.h>
 
 // ============================================
 // PIN DEFINITIONS
@@ -52,29 +51,22 @@
 // Rotary Angle Potentiometer (3 pins)
 #define ROTARY_ANGLE_PIN 35
 
-// DFPlayer Mini (MP3/WAV Player) - Comunicación directa
-#define DFPLAYER_TX 17  // ESP32 TX -> DFPlayer RX (Pin 2)
-#define DFPLAYER_RX 16  // ESP32 RX -> DFPlayer TX (Pin 3)
-
-// SD Card Reader (6 pins SPI)
-#define SD_CS   15
-#define SD_MOSI 23
-#define SD_MISO 19
-#define SD_SCK  18
+// Volume Toggle Button (pin 14)
+#define VOLUME_TOGGLE_BTN 14
 
 // ============================================
 // CONSTANTS
 // ============================================
 #define MAX_STEPS 16
-#define MAX_TRACKS 8
+#define MAX_TRACKS 16  // 16 instrumentos: 8 por página
 #define MAX_PATTERNS 16
 #define MAX_KITS 3
 #define MIN_BPM 40
 #define MAX_BPM 240
 #define DEFAULT_BPM 120
-#define DEFAULT_VOLUME 15
-#define MAX_SAMPLES 8
-#define DFPLAYER_VOLUME 30  // Volumen DFPlayer (0-30)
+#define DEFAULT_VOLUME 75
+#define MAX_VOLUME 150  // Volumen máximo ampliado para mayor potencia
+#define MAX_SAMPLES 16  // Total de instrumentos disponibles
 
 // ============================================
 // SISTEMA DE TEMAS VISUALES
@@ -215,25 +207,6 @@ enum DisplayMode {
     DISPLAY_STEP
 };
 
-enum SamplerMode {
-    SAMPLER_ONESHOT,   // Reproducir una vez
-    SAMPLER_LOOP,      // Loop continuo
-    SAMPLER_HOLD,      // Mantener mientras se presiona
-    SAMPLER_REVERSE    // Reproducir al revés (si es posible)
-};
-
-enum SamplerFunction {
-    FUNC_NONE = 0,
-    FUNC_LOOP = 8,      // S9: Toggle Loop mode
-    FUNC_HOLD = 9,      // S10: Toggle Hold mode  
-    FUNC_STOP = 10,     // S11: Stop all
-    FUNC_VOLUME_UP = 11,// S12: Volumen +
-    FUNC_VOLUME_DN = 12,// S13: Volumen -
-    FUNC_PREV = 13,     // S14: Sample anterior
-    FUNC_NEXT = 14,     // S15: Sample siguiente
-    FUNC_CLEAR = 15     // S16: Clear/Reset
-};
-
 // ============================================
 // STRUCTURES
 // ============================================
@@ -248,33 +221,12 @@ struct DrumKit {
     int folder;
 };
 
-struct SampleInfo {
-    String name;
-    int number;        // 1-8
-    bool isLooping;
-    bool isPlaying;
-    int volume;
-    SamplerMode mode;
-    unsigned long lastPlayTime;  // Para tracking de repetición en LOOP
-    
-    SampleInfo() : 
-        name(""),
-        number(0),
-        isLooping(false),
-        isPlaying(false),
-        volume(DFPLAYER_VOLUME),
-        mode(SAMPLER_ONESHOT),
-        lastPlayTime(0) {}
-};
-
 struct DiagnosticInfo {
     bool tftOk;
     bool tm1638_1_Ok;
     bool tm1638_2_Ok;
     bool encoderOk;
-    bool sdCardOk;
-    bool dfplayerOk;
-    int filesFound;
+    bool udpConnected;
     String lastError;
     
     DiagnosticInfo() : 
@@ -282,9 +234,7 @@ struct DiagnosticInfo {
         tm1638_1_Ok(false), 
         tm1638_2_Ok(false), 
         encoderOk(false), 
-        sdCardOk(false), 
-        dfplayerOk(false),
-        filesFound(0), 
+        udpConnected(false),
         lastError("") {}
 };
 
@@ -308,6 +258,7 @@ Screen currentScreen = SCREEN_BOOT;
 int currentPattern = 0;
 int currentKit = 0;
 int currentStep = 0;
+int sequencerPage = 0;  // 0 = instrumentos 1-8, 1 = instrumentos 9-16
 int tempo = DEFAULT_BPM;
 int volume = DEFAULT_VOLUME;
 unsigned long lastStepTime = 0;
@@ -315,8 +266,13 @@ unsigned long stepInterval = 0;
 bool isPlaying = false;
 
 // Servidor Web WiFi
-const char* ssid = "RED808";
-const char* password = "12345678";
+// Configuración WiFi - SLAVE se conecta al MASTER
+const char* ssid = "RED808";          // WiFi del MASTER
+const char* password = "red808esp32"; // Password del MASTER
+const char* masterIP = "192.168.4.1"; // IP del MASTER
+const int udpPort = 8888;              // Puerto UDP del MASTER
+
+WiFiUDP udp;
 AsyncWebServer server(80);
 bool webServerEnabled = false;
 
@@ -338,14 +294,24 @@ volatile bool encoderChanged = false;
 static uint8_t encoderState = 0;
 static const int8_t encoderStates[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 
-int volumeLevel = DEFAULT_VOLUME;
-int lastVolumeLevel = DEFAULT_VOLUME;
+// Volume control - DUAL MODE (Sequencer / Live Pads)
+enum VolumeMode {
+    VOL_SEQUENCER,
+    VOL_LIVE_PADS
+};
+VolumeMode volumeMode = VOL_SEQUENCER;
+int sequencerVolume = DEFAULT_VOLUME;  // 75%
+int livePadsVolume = 100;  // 100% - más fuerte para tocar en vivo
+int lastSequencerVolume = DEFAULT_VOLUME;
+int lastLivePadsVolume = 100;
 unsigned long lastVolumeRead = 0;
 
 unsigned long ledOffTime[16] = {0};
 bool ledActive[16] = {false};
 
 int audioLevels[8] = {0};
+bool padPressed[16] = {false};  // Estado de pads presionados para efecto neón
+unsigned long padPressTime[16] = {0};  // Tiempo de presión para tremolo
 unsigned long lastVizUpdate = 0;
 
 DisplayMode currentDisplayMode = DISPLAY_BPM;
@@ -357,21 +323,15 @@ unsigned long instrumentDisplayTime = 0;
 unsigned long lastButtonDebug = 0;
 int lastAdcValue = -1;
 
-// Sampler variables
-SampleInfo samples[MAX_SAMPLES];
-int currentSample = 0;
-int dfplayerVolume = DFPLAYER_VOLUME;
-SamplerMode globalSamplerMode = SAMPLER_ONESHOT;
-bool samplerInitialized = false;
-int lastPlayedSample = -1;
-unsigned long samplePlayTime = 0;
+// UDP connection state
+bool udpConnected = false;
+unsigned long lastUdpCheck = 0;
+const unsigned long UDP_CHECK_INTERVAL = 5000;
 
-// Variables para repetición de samples al mantener botón
+// Variables para manejo de botones
 uint16_t lastButtonState = 0;
 unsigned long buttonPressTime[16] = {0};
 unsigned long lastRepeatTime[16] = {0};
-const unsigned long HOLD_THRESHOLD = 250;  // Reducido para respuesta más rápida
-const unsigned long REPEAT_INTERVAL = 120; // Más rápido y estable
 
 // ============================================
 // DATA
@@ -384,7 +344,9 @@ const char* kitNames[MAX_KITS] = {
 
 const char* trackNames[MAX_TRACKS] = {
     "BD", "SD", "CH", "OH",
-    "CL", "T1", "T2", "CY"
+    "CL", "T1", "T2", "CY",
+    "PC", "CB", "MA", "WH",
+    "CR", "RD", "CP", "RS"
 };
 
 const char* instrumentNames[MAX_TRACKS] = {
@@ -395,7 +357,15 @@ const char* instrumentNames[MAX_TRACKS] = {
     "CLAP    ",
     "TOM-LO  ",
     "TOM-HI  ",
-    "CYMBAL  "
+    "CYMBAL  ",
+    "PERCUSS ",
+    "COWBELL ",
+    "MARACAS ",
+    "WHISTLE ",
+    "CRASH   ",
+    "RIDE    ",
+    "CLAVES  ",
+    "RIMSHOT "
 };
 
 const char* menuItems[] = {
@@ -415,15 +385,22 @@ const uint16_t instrumentColors[MAX_TRACKS] = {
     COLOR_INST_CLAP,   // CL (Clap = CLAP)
     COLOR_INST_TOMLO,  // T1 (Tom Low = TOM-LO)
     COLOR_INST_TOMHI,  // T2 (Tom High = TOM-HI)
-    COLOR_INST_CYMBAL  // CY (Cymbal = CYMBAL)
+    COLOR_INST_CYMBAL, // CY (Cymbal = CYMBAL)
+    0xFD20,            // PC (Percussion = Naranja)
+    0xFFE0,            // CB (Cowbell = Amarillo)
+    0x07FF,            // MA (Maracas = Cyan)
+    0xF81F,            // WH (Whistle = Magenta)
+    0xA817,            // CR (Crash = Púrpura)
+    0x2E86,            // RD (Ride = Verde claro)
+    0x3D8F,            // CP (Claves = Azul claro)
+    0xFBE0             // RS (Rimshot = Rosa)
 };
 
 // ============================================
 // FUNCTION PROTOTYPES
 // ============================================
 void setupKits();
-void setupPatterns();
-void setupSDCard();
+void setupWiFiAndUDP();
 void calculateStepInterval();
 void updateSequencer();
 void handleButtons();
@@ -435,16 +412,10 @@ void handleVolume();
 void debugAnalogButtons();
 void triggerDrum(int track);
 void testButtonsOnBoot();
-void setupDFPlayer();
-void playBootJingle();
-void testAllSamples();
-void playSample(int sampleNum);
-void playFromFolder(int folder, int file);
-void stopAllSamples();
-void toggleSampleLoop(int sampleNum);
-void changeSamplerMode(SamplerMode mode);
-void handleSamplerFunction(SamplerFunction func);
-void drawSamplerUI();
+void sendUDPCommand(const char* cmd);
+void sendUDPCommand(JsonDocument& doc);
+void receiveUDPData();
+void requestPatternFromMaster();
 void drawBootScreen();
 void drawConsoleBootScreen();
 void drawSpectrumAnimation();
@@ -456,7 +427,7 @@ void drawSettingsScreen();
 void drawDiagnosticsScreen();
 void drawCreditsScreen();
 void drawHeader();
-void drawVUMeters();
+void drawLivePad(int padIndex, bool highlight);
 void updateTM1638Displays();
 void updateStepLEDs();
 void updateStepLEDsForTrack(int track);
@@ -518,6 +489,8 @@ void setupKits() {
 }
 
 void setupPatterns() {
+    // Los patrones se leerán del MASTER vía UDP
+    // Solo inicializar la estructura vacía
     for (int p = 0; p < MAX_PATTERNS; p++) {
         patterns[p].name = "PTN-" + String(p + 1);
         for (int t = 0; t < MAX_TRACKS; t++) {
@@ -527,42 +500,275 @@ void setupPatterns() {
             }
         }
     }
+    Serial.println("► Patterns initialized (will sync from MASTER)");
+    Serial.printf("   Pattern size: %d tracks x %d steps\n", MAX_TRACKS, MAX_STEPS);
+}
+
+// Debug: Imprimir patrón recibido
+void printReceivedPattern(int patternNum) {
+    Serial.printf("\n=== PATTERN %d RECEIVED ===", patternNum + 1);
+    Serial.printf(" (%dx%d) ===\n", MAX_TRACKS, MAX_STEPS);
+    Pattern& p = patterns[patternNum];
     
-    // Pattern 1: HOUSE (más profesional)
-    patterns[0].name = "HOUSE";
-    // Track 0 (Kick): Four-on-floor
-    for (int i = 0; i < MAX_STEPS; i += 4) patterns[0].steps[0][i] = true;
-    // Track 1 (Snare): beats 5 y 13
-    patterns[0].steps[1][4] = true;
-    patterns[0].steps[1][12] = true;
-    // Track 2 (Closed HH): cada 2 steps (offbeat)
-    for (int i = 1; i < MAX_STEPS; i += 2) patterns[0].steps[2][i] = true;
-    // Track 3 (Open HH): acentos
-    patterns[0].steps[3][6] = true;
-    patterns[0].steps[3][14] = true;
-    // Track 4 (Clap): refuerzo de snare
-    patterns[0].steps[4][4] = true;
-    patterns[0].steps[4][12] = true;
-    // Track 5 (Tom): fills
-    patterns[0].steps[5][11] = true;
-    patterns[0].steps[5][15] = true;
+    // Header con números de steps
+    Serial.print("   ");
+    for (int s = 0; s < MAX_STEPS; s++) {
+        Serial.printf("%2d ", s + 1);
+    }
+    Serial.println();
     
-    // Pattern 2: TECHNO
-    patterns[1].name = "TECHNO";
-    for (int i = 0; i < MAX_STEPS; i += 4) patterns[1].steps[0][i] = true;
-    for (int i = 0; i < MAX_STEPS; i++) patterns[1].steps[2][i] = true;
-    patterns[1].steps[1][8] = true;
+    // Cada instrumento
+    for (int t = 0; t < MAX_TRACKS; t++) {
+        Serial.printf("T%02d ", t + 1);
+        for (int s = 0; s < MAX_STEPS; s++) {
+            Serial.print(p.steps[t][s] ? "■  " : "·  ");
+        }
+        Serial.printf(" %s\n", p.muted[t] ? "[MUTED]" : "");
+    }
+    Serial.println("================================\n");
+}
+
+// ============================================
+// UDP COMMUNICATION FUNCTIONS
+// ============================================
+void setupWiFiAndUDP() {
+    Serial.println("\n╔════════════════════════════════════╗");
+    Serial.println("║   CONNECTING TO MASTER (WiFi UDP)  ║");
+    Serial.println("╚════════════════════════════════════╝");
+    Serial.printf("  SSID: %s\n", ssid);
+    Serial.printf("  Master IP: %s\n", masterIP);
+    Serial.printf("  UDP Port: %d\n", udpPort);
     
-    // Pattern 3: BREAKBEAT
-    patterns[2].name = "BREAK";
-    patterns[2].steps[0][0] = true;
-    patterns[2].steps[0][6] = true;
-    patterns[2].steps[0][10] = true;
-    patterns[2].steps[1][4] = true;
-    patterns[2].steps[1][12] = true;
-    for (int i = 0; i < MAX_STEPS; i += 2) patterns[2].steps[2][i] = true;
-    patterns[2].steps[3][2] = true;
-    patterns[2].steps[3][14] = true;
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n✓ WiFi connected!");
+        Serial.print("  IP Address: ");
+        Serial.println(WiFi.localIP());
+        
+        udp.begin(udpPort);
+        udpConnected = true;
+        diagnostic.udpConnected = true;
+        
+        // Enviar hello al master
+        JsonDocument doc;
+        doc["cmd"] = "hello";
+        doc["device"] = "SURFACE";
+        sendUDPCommand(doc);
+        
+        Serial.println("✓ UDP initialized - Ready to send commands");
+        
+        // Solicitar patrón actual al MASTER automáticamente
+        delay(100);  // Dar tiempo al MASTER para procesar hello
+        requestPatternFromMaster();
+        Serial.println("► Auto-requesting pattern from MASTER...");
+    } else {
+        Serial.println("\n✗ WiFi connection FAILED");
+        Serial.println("  Will retry in background...");
+        udpConnected = false;
+        diagnostic.udpConnected = false;
+        diagnostic.lastError = "WiFi connection failed";
+    }
+}
+
+void sendUDPCommand(const char* cmd) {
+    if (!udpConnected) {
+        Serial.println("✗ UDP not connected - command not sent");
+        return;
+    }
+    
+    udp.beginPacket(masterIP, udpPort);
+    udp.write((uint8_t*)cmd, strlen(cmd));
+    udp.endPacket();
+    
+    Serial.printf("► UDP: %s\n", cmd);
+}
+
+void sendUDPCommand(JsonDocument& doc) {
+    String json;
+    serializeJson(doc, json);
+    sendUDPCommand(json.c_str());
+}
+
+// Recibir datos UDP del MASTER
+void receiveUDPData() {
+    int packetSize = udp.parsePacket();
+    if (packetSize > 0) {
+        char incomingPacket[512];
+        int len = udp.read(incomingPacket, sizeof(incomingPacket) - 1);
+        if (len > 0) {
+            incomingPacket[len] = 0;  // Null terminator
+            
+            Serial.printf("\n◄ UDP RECEIVED (%d bytes): %s\n", len, incomingPacket);
+            
+            // Parsear JSON
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, incomingPacket);
+            
+            if (error) {
+                Serial.printf("✗ JSON parse error: %s\n", error.c_str());
+                return;
+            }
+            
+            const char* cmd = doc["cmd"];
+            if (cmd) {
+                Serial.printf("► Command received: %s\n", cmd);
+                
+                // Sincronizar patrón
+                if (strcmp(cmd, "pattern_sync") == 0) {
+                    int patternNum = doc["pattern"] | currentPattern;
+                    
+                    Serial.println("\n═══════════════════════════════════════");
+                    Serial.printf("► PATTERN SYNC RECEIVED: Pattern %d\n", patternNum + 1);
+                    Serial.println("═══════════════════════════════════════");
+                    
+                    // Parsear array de steps (flexible: acepta de 1 a MAX_TRACKS)
+                    JsonArray data = doc["data"];
+                    if (data && data.size() > 0) {
+                        int totalStepsActive = 0;
+                        int tracksReceived = min((int)data.size(), MAX_TRACKS);
+                        
+                        Serial.printf("► Tracks received: %d/%d\n", tracksReceived, MAX_TRACKS);
+                        
+                        // Primero limpiar el patrón completo
+                        for (int t = 0; t < MAX_TRACKS; t++) {
+                            for (int s = 0; s < MAX_STEPS; s++) {
+                                patterns[patternNum].steps[t][s] = false;
+                            }
+                        }
+                        
+                        // Cargar tracks recibidos
+                        for (int t = 0; t < tracksReceived; t++) {
+                            JsonArray trackData = data[t];
+                            if (trackData) {
+                                int stepsInTrack = min((int)trackData.size(), MAX_STEPS);
+                                Serial.printf("   Track %02d: %d steps\n", t + 1, stepsInTrack);
+                                
+                                for (int s = 0; s < stepsInTrack; s++) {
+                                    patterns[patternNum].steps[t][s] = trackData[s];
+                                    if (trackData[s]) totalStepsActive++;
+                                }
+                            }
+                        }
+                        
+                        Serial.printf("► Total active steps: %d\n", totalStepsActive);
+                        
+                        // Debug: imprimir patrón recibido
+                        printReceivedPattern(patternNum);
+                        
+                        // Forzar redibujado SIEMPRE que se reciba un patrón
+                        if (patternNum == currentPattern) {
+                            needsFullRedraw = true;
+                            needsGridUpdate = true;
+                            updateStepLEDsForTrack(selectedTrack);
+                            Serial.println("► Screen will be redrawn on next loop");
+                        }
+                        
+                        // Mostrar notificación en TFT
+                        if (currentScreen == SCREEN_SEQUENCER) {
+                            tft.fillRect(0, 290, 320, 30, COLOR_BG);
+                            tft.setTextColor(COLOR_SUCCESS, COLOR_BG);
+                            tft.setTextSize(1);
+                            tft.setCursor(10, 295);
+                            tft.printf("SYNCED Pattern %d (%d tracks, %d steps)", 
+                                      patternNum + 1, tracksReceived, totalStepsActive);
+                        }
+                        
+                        Serial.println("✓ Pattern synchronized successfully!");
+                        Serial.println("═══════════════════════════════════════\n");
+                    } else {
+                        Serial.printf("✗ Invalid pattern data: %s\n", 
+                                     data ? "empty array" : "missing data field");
+                    }
+                }
+                // Sincronizar BPM
+                else if (strcmp(cmd, "tempo_sync") == 0) {
+                    int newTempo = doc["value"];
+                    if (newTempo >= MIN_BPM && newTempo <= MAX_BPM) {
+                        tempo = newTempo;
+                        calculateStepInterval();
+                        Serial.printf("✓ Tempo synced: %d BPM\n", tempo);
+                        if (currentScreen == SCREEN_SEQUENCER) {
+                            needsHeaderUpdate = true;
+                        }
+                    }
+                }
+                // Sincronizar step actual
+                else if (strcmp(cmd, "step_sync") == 0) {
+                    int newStep = doc["step"];
+                    if (newStep >= 0 && newStep < MAX_STEPS) {
+                        currentStep = newStep;
+                        if (currentScreen == SCREEN_SEQUENCER) {
+                            needsGridUpdate = true;
+                        }
+                    }
+                }
+                // Sincronizar volumen del sequencer
+                else if (strcmp(cmd, "volume_seq_sync") == 0) {
+                    int newVol = doc["value"];
+                    if (newVol >= 0 && newVol <= MAX_VOLUME) {
+                        sequencerVolume = newVol;
+                        lastSequencerVolume = newVol;
+                        Serial.printf("✓ Sequencer volume synced: %d%%\n", sequencerVolume);
+                        needsHeaderUpdate = true;
+                    }
+                }
+                // Sincronizar volumen de live pads
+                else if (strcmp(cmd, "volume_live_sync") == 0) {
+                    int newVol = doc["value"];
+                    if (newVol >= 0 && newVol <= MAX_VOLUME) {
+                        livePadsVolume = newVol;
+                        lastLivePadsVolume = newVol;
+                        Serial.printf("✓ Live pads volume synced: %d%%\n", livePadsVolume);
+                        needsHeaderUpdate = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Solicitar patrón al MASTER
+void requestPatternFromMaster() {
+    if (!udpConnected) {
+        Serial.println("✗ Cannot request pattern: UDP not connected");
+        if (currentScreen == SCREEN_SEQUENCER) {
+            tft.fillRect(0, 290, 320, 30, COLOR_BG);
+            tft.setTextColor(COLOR_ERROR, COLOR_BG);
+            tft.setTextSize(1);
+            tft.setCursor(10, 295);
+            tft.print("ERROR: Not connected to MASTER");
+        }
+        return;
+    }
+    
+    JsonDocument doc;
+    doc["cmd"] = "get_pattern";
+    doc["pattern"] = currentPattern;
+    sendUDPCommand(doc);
+    
+    Serial.println("\n───────────────────────────────────────");
+    Serial.printf("► REQUESTING Pattern %d from MASTER\n", currentPattern + 1);
+    Serial.printf("   Master IP: %s:%d\n", masterIP, udpPort);
+    Serial.println("   Waiting for response...");
+    Serial.println("───────────────────────────────────────\n");
+    
+    // Mostrar en pantalla que se está sincronizando
+    if (currentScreen == SCREEN_SEQUENCER) {
+        tft.fillRect(0, 290, 320, 30, COLOR_BG);
+        tft.setTextColor(COLOR_WARNING, COLOR_BG);
+        tft.setTextSize(1);
+        tft.setCursor(10, 295);
+        tft.printf("Requesting Pattern %d...", currentPattern + 1);
+    }
 }
 
 void calculateStepInterval() {
@@ -1116,30 +1322,20 @@ void setup() {
     delay(1000);
     
     Serial.println("\n\n╔════════════════════════════════════╗");
-    Serial.println("║   RED808 V5 - DRUM MACHINE         ║");
-    Serial.println("║   2x TM1638 + SD Card              ║");
-    Serial.println("║   NO AUDIO (Visual Only)           ║");
+    Serial.println("║   RED808 V6 - SURFACE (SLAVE)     ║");
+    Serial.println("║   UDP Controller via WiFi          ║");
+    Serial.println("║   Connects to MASTER DrumMachine   ║");
     Serial.println("╚════════════════════════════════════╝\n");
-     Serial.println("► SD Wiring Test...");
 
-     // ⚠️ ESTABLECER TODOS LOS CS EN HIGH PRIMERO
-    pinMode(TFT_CS, OUTPUT);
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(TFT_CS, HIGH);
-    digitalWrite(SD_CS, HIGH);
-    
-    delay(100);
-    //testSDWiring(); // AGREGAR ESTO
     // TFT Init
     Serial.print("► TFT Init... ");
+    pinMode(TFT_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
     tft.init();
     tft.setRotation(3);
     tft.fillScreen(COLOR_BG);
     diagnostic.tftOk = true;
     Serial.println("OK (480x320)");
-    
-    // Servidor Web WiFi (opcional - comentar si no se necesita)
-    setupWebServer();
     
     // TM1638 #1
     Serial.print("► TM1638 #1 Init... ");
@@ -1169,13 +1365,11 @@ void setup() {
     
     // 3 Button Panel - Analog Buttons
     pinMode(ANALOG_BUTTONS_PIN, INPUT);
-    Serial.println("5 Analog Buttons ready on pin 34 (PLAY/STOP, MUTE, BPM-, BPM+, BACK)");
-    Serial.println("Module: SMART OPEN ANALOG BUTTONS (GND-VCC-SIG)");
-    Serial.println("\n╔═══════════════════════════════════════════════════╗");
-    Serial.println("║  CALIBRATION MODE ACTIVE                          ║");
-    Serial.println("║  Press each button and note ADC values in Serial  ║");
-    Serial.println("║  Then adjust ranges in lines 38-44 of main.cpp    ║");
-    Serial.println("╚═══════════════════════════════════════════════════╝\n");
+    Serial.println("3 Analog Buttons ready on pin 34 (PLAY/STOP, MUTE, BACK)");
+    
+    // Volume Toggle Button (pin 14)
+    pinMode(VOLUME_TOGGLE_BTN, INPUT_PULLUP);
+    Serial.println("► Volume Toggle Button ready on pin 14 (SEQ/PADS)");
     
     // Configurar interrupciones para CLK y DT
     attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), []() {
@@ -1214,25 +1408,34 @@ void setup() {
     // Boot estilo consola UNIX
     drawConsoleBootScreen();
     
-    // SD Card desactivada - no necesaria para DFPlayer
-    //Serial.println("► SD Card Init...");
-    //setupSDCard();
+    // Conectar al MASTER vía WiFi UDP
+    setupWiFiAndUDP();
     
-    // Inicializar DFPlayer Mini
-    Serial.println("► DFPlayer Mini Init...");
-    setupDFPlayer();
+    // Mostrar estado de conexión en pantalla
+    tft.fillRect(0, 270, 480, 50, 0x0000);
+    tft.setTextSize(2);
+    if (udpConnected) {
+        tft.setTextColor(THEME_RED808.success);
+        tft.setCursor(100, 280);
+        tft.println("CONNECTED TO MASTER");
+        tft.setTextSize(1);
+        tft.setTextColor(THEME_RED808.accent2);
+        tft.setCursor(150, 300);
+        tft.printf("IP: %s", WiFi.localIP().toString().c_str());
+    } else {
+        tft.setTextColor(THEME_RED808.error);
+        tft.setCursor(120, 280);
+        tft.println("NO MASTER CONNECTION");
+        tft.setTextSize(1);
+        tft.setTextColor(THEME_RED808.warning);
+        tft.setCursor(140, 300);
+        tft.println("Will retry in background...");
+    }
+    delay(1500);
     
     setupKits();
     setupPatterns();
     calculateStepInterval();
-    
-    // Test de samples si DFPlayer OK (OPCIONAL - comentar si no se quiere el test)
-    // if (samplerInitialized) {
-    //     testAllSamples();
-    // }
-    
-    // Actualizar pantalla de boot con estado de SD
-    // (ya se muestra en drawConsoleBootScreen pero se actualiza después de setupSDCard)
     
     // LED test rápido
     for (int i = 0; i < 16; i++) {
@@ -1245,12 +1448,12 @@ void setup() {
     // Spectrum Analyzer Animation
     drawSpectrumAnimation();
     
-    if (samplerInitialized) {
-        tm1.displayText("SAMPLER ");
+    if (udpConnected) {
+        tm1.displayText("SURFACE ");
         tm2.displayText("READY   ");
     } else {
-        tm1.displayText("READY   ");
-        tm2.displayText("RED808  ");
+        tm1.displayText("NO CONN ");
+        tm2.displayText("MASTER  ");
     }
     
     delay(500);
@@ -1259,17 +1462,9 @@ void setup() {
     needsFullRedraw = true;
     
     Serial.println("\n╔════════════════════════════════════╗");
-    Serial.println("║       RED808 V5 READY!             ║");
+    Serial.println("║   RED808 SURFACE READY!            ║");
+    Serial.println("║   Connected to MASTER via UDP      ║");
     Serial.println("╚════════════════════════════════════╝\n");
-    
-    if (samplerInitialized) {
-        Serial.println("╔════════════════════════════════════════════╗");
-        Serial.println("║  SAMPLER READY                             ║");
-        Serial.println("║  Go to LIVE PAD to play samples            ║");
-        Serial.println("║  S1-S8: Play samples 001-008               ║");
-        Serial.println("║  S9-S16: Functions (LOOP, STOP, VOL, etc)  ║");
-        Serial.println("╚════════════════════════════════════════════╝\n");
-    }
 }
 
 // ============================================
@@ -1278,8 +1473,6 @@ void setup() {
 void loop() {
     static unsigned long lastLoopTime = 0;
     unsigned long currentTime = millis();
-    
-   // encoder.tick();
     
     if (currentTime - lastLoopTime < 16) {
         return;
@@ -1305,22 +1498,16 @@ void loop() {
         updateSequencer();
     }
     
-    // Mantener samples en loop (solo en modo LOOP)
-    if (currentScreen == SCREEN_LIVE && samplerInitialized && globalSamplerMode == SAMPLER_LOOP) {
-        for (int i = 0; i < MAX_SAMPLES; i++) {
-            if (samples[i].isLooping && samples[i].isPlaying) {
-                // Repetir sample cada ~2 segundos (ajustar según duración de tus samples)
-                if (currentTime - samples[i].lastPlayTime > 2000) {
-                    int folder = kits[currentKit].folder;
-                    playFromFolder(folder, i + 1);
-                    samples[i].lastPlayTime = currentTime;
-                    
-                    // Feedback LED
-                    setLED(i, true);
-                    ledActive[i] = true;
-                    ledOffTime[i] = currentTime + 100;
-                }
-            }
+    // Recibir datos UDP del MASTER
+    receiveUDPData();
+    
+    // Reconectar WiFi si se pierde la conexión
+    if (!udpConnected && (currentTime - lastUdpCheck > UDP_CHECK_INTERVAL)) {
+        lastUdpCheck = currentTime;
+        Serial.println("Checking WiFi connection...");
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("Reconnecting to MASTER...");
+            setupWiFiAndUDP();
         }
     }
     
@@ -1371,348 +1558,35 @@ void loop() {
 }
 
 // ============================================
-// SEQUENCER
+// SEQUENCER - SOLO VISUALIZACIÓN (No audio local)
 // ============================================
 void updateSequencer() {
-    unsigned long currentTime = millis();
+    // IMPORTANTE: Este SLAVE no reproduce audio localmente
+    // Solo actualiza la visualización basándose en el step sync del MASTER
+    // El MASTER es quien ejecuta el sequencer real
     
-    if (currentTime - lastStepTime >= stepInterval) {
-        lastStepTime = currentTime;
-        
-        Pattern& pattern = patterns[currentPattern];
-        for (int track = 0; track < MAX_TRACKS; track++) {
-            if (pattern.steps[track][currentStep] && !pattern.muted[track]) {
-                triggerDrum(track);
-            }
-        }
-        
-        updateStepLEDs();
-        
-        currentStep = (currentStep + 1) % MAX_STEPS;
-        needsGridUpdate = true;
-    }
+    // Solo actualizar LEDs basándose en currentStep (sincronizado via UDP)
+    updateStepLEDs();
 }
 
 // ============================================
-// DFPLAYER & SAMPLER FUNCTIONS
+// DRUM TRIGGER (UDP)
 // ============================================
-
-// Funciones de comandos directos para DFPlayer
-void sendCommandFast(byte cmd, byte param1, byte param2) {
-    uint8_t buffer[10] = {0x7E, 0xFF, 0x06, cmd, 0x00, param1, param2, 0x00, 0x00, 0xEF};
-    
-    // Calcular checksum
-    uint16_t checksum = -(buffer[1] + buffer[2] + buffer[3] + buffer[4] + buffer[5] + buffer[6]);
-    buffer[7] = (checksum >> 8) & 0xFF;
-    buffer[8] = checksum & 0xFF;
-    
-    // Limpiar buffer de entrada
-    while(dfplayerSerial.available()) {
-        dfplayerSerial.read();
-    }
-    
-    // Enviar con micro delay para evitar clicks
-    dfplayerSerial.write(buffer, 10);
-    delayMicroseconds(1000);  // 1ms para que el DFPlayer procese limpio
-}
-
-void sendCommand(byte cmd, byte param1, byte param2) {
-    uint8_t buffer[10] = {0x7E, 0xFF, 0x06, cmd, 0x00, param1, param2, 0x00, 0x00, 0xEF};
-    
-    // Calcular checksum
-    uint16_t checksum = -(buffer[1] + buffer[2] + buffer[3] + buffer[4] + buffer[5] + buffer[6]);
-    buffer[7] = (checksum >> 8) & 0xFF;
-    buffer[8] = checksum & 0xFF;
-    
-    // Limpiar buffer de entrada para evitar comandos acumulados
-    while(dfplayerSerial.available()) {
-        dfplayerSerial.read();
-    }
-    
-    // Enviar comando rápido
-    dfplayerSerial.write(buffer, 10);
-    delay(10);  // Delay óptimo: suficiente para que DFPlayer procese sin saturar
-}
-
-void playFromFolder(int folder, int file) {
-    int folderFile = (folder << 8) | file;  // Combinar folder y file en un solo valor
-    sendCommandFast(0x0F, (folderFile >> 8) & 0xFF, folderFile & 0xFF);  // Sin delay
-}
-
-void setVolume(int vol) {
-    if (vol < 0) vol = 0;
-    if (vol > 30) vol = 30;
-    sendCommand(0x06, 0x00, vol);
-}
-
-void stopDFPlayer() {
-    sendCommand(0x16, 0x00, 0x00);  // Comando STOP
-}
-
-void resetDFPlayer() {
-    sendCommand(0x0C, 0x00, 0x00);  // Comando RESET
-    delay(100);  // Reducido para velocidad
-}
-
-void setSDSource() {
-    sendCommand(0x09, 0x00, 0x02);  // Comando para seleccionar SD card
-    delay(30);
-}
-
-void queryTotalFiles() {
-    sendCommand(0x48, 0x00, 0x00);  // Comando para obtener total de archivos
-}
-
-void queryFilesInFolder(int folder) {
-    sendCommand(0x4E, 0x00, folder);  // Comando para archivos en carpeta específica
-}
-
-void setupDFPlayer() {
-    // Inicializar Serial para DFPlayer
-    dfplayerSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
-    delay(500);
-    
-    // Reset del módulo
-    resetDFPlayer();
-    delay(200);
-    
-    // Seleccionar fuente SD
-    setSDSource();
-    delay(100);
-    
-    // Configurar volumen inicial
-    setVolume(30);
-    dfplayerVolume = 30;
-    delay(50);
-    
-    diagnostic.dfplayerOk = true;
-    samplerInitialized = true;
-    
-    // Inicializar info de samples
-    for (int i = 0; i < MAX_SAMPLES; i++) {
-        samples[i].number = i + 1;
-        samples[i].name = "SAMPLE " + String(i + 1);
-        samples[i].isLooping = false;
-        samples[i].isPlaying = false;
-        samples[i].volume = dfplayerVolume;
-        samples[i].mode = SAMPLER_ONESHOT;
-    }
-}
-
-void playSample(int sampleNum) {
-    if (!samplerInitialized || sampleNum < 0 || sampleNum >= MAX_SAMPLES) {
-        return;
-    }
-    
-    static int lastSample = -1;
-    static unsigned long lastSampleTime = 0;
-    unsigned long currentTime = millis();
-    
-    // Si es el mismo sample y pasó menos de 80ms, ignorar para evitar clicks
-    if (sampleNum == lastSample && (currentTime - lastSampleTime) < 80) {
-        return;
-    }
-    
-    int fileNum = sampleNum + 1;  // 0->1, 1->2, etc.
-    
-    // Reproducir desde carpeta del kit actual
-    int folder = kits[currentKit].folder;
-    playFromFolder(folder, fileNum);
-    
-    lastSample = sampleNum;
-    lastSampleTime = currentTime;
-    
-    // Actualizar estado según modo
-    samples[sampleNum].isPlaying = true;
-    samples[sampleNum].mode = globalSamplerMode;
-    
-    // Si está en modo LOOP, activar flag de looping
-    if (globalSamplerMode == SAMPLER_LOOP) {
-        samples[sampleNum].isLooping = true;
-    }
-    
-    lastPlayedSample = sampleNum;
-    samplePlayTime = millis();
-    
-    // Actualizar LED
-    setLED(sampleNum, true);
-    ledActive[sampleNum] = true;
-    ledOffTime[sampleNum] = millis() + 300;
-    
-    // Mostrar en TM1638
-    char display[9];
-    snprintf(display, 9, "SMP %d   ", fileNum);
-    tm1.displayText(display);
-    
-    const char* modeNames[] = {"ONESHOT", "LOOP   ", "HOLD   ", "REVERSE"};
-    snprintf(display, 9, "%-8s", modeNames[globalSamplerMode]);
-    tm2.displayText(display);
-}
-
-void playBootJingle() {
-    // Jingle de arranque: patrón rítmico estilo 808 simple
-    if (!samplerInitialized) return;
-    
-    // Secuencia más simple y robusta: Kick-Snare-Kick-Snare
-    int sequence[] = {0, 1, 0, 1};  // Kick, Snare, Kick, Snare
-    int durations[] = {300, 300, 300, 400};
-    
-    for (int i = 0; i < 4; i++) {
-        // Enviar comando de reproducción
-        sendCommandFast(0x0F, 0x01, sequence[i] + 1);
-        
-        // Actualizar LEDs para feedback visual
-        setLED(sequence[i], true);
-        delay(durations[i]);
-        setLED(sequence[i], false);
-        delay(50);  // Pequeña pausa entre samples
-    }
-    
-    delay(200);  // Pausa final
-    setAllLEDs(0x0000);
-}
-
-void stopAllSamples() {
-    if (!samplerInitialized) return;
-    
-    // NO enviamos STOP - el módulo queda siempre activo para máxima velocidad
-    // Los samples se interrumpen automáticamente al reproducir el siguiente
-    
-    for (int i = 0; i < MAX_SAMPLES; i++) {
-        samples[i].isPlaying = false;
-        samples[i].isLooping = false;  // Desactivar loops
-    }
-    
-    setAllLEDs(0x0000);
-    
-    tm1.displayText("STOPPED ");
-    tm2.displayText("        ");
-}
-
-void toggleSampleLoop(int sampleNum) {
-    if (!samplerInitialized || sampleNum < 0 || sampleNum >= MAX_SAMPLES) {
-        return;
-    }
-    
-    samples[sampleNum].isLooping = !samples[sampleNum].isLooping;
-    
-    // Si está en loop, reproducir el sample en modo loop
-    if (samples[sampleNum].isLooping) {
-        playFromFolder(1, sampleNum + 1);
-    }
-}
-
-void changeSamplerMode(SamplerMode mode) {
-    globalSamplerMode = mode;
-    
-    const char* modeNames[] = {"ONESHOT", "LOOP", "HOLD", "REVERSE"};
-    char display[9];
-    snprintf(display, 9, "%-8s", modeNames[mode]);
-    tm2.displayText(display);
-}
-
-void handleSamplerFunction(SamplerFunction func) {
-    if (!samplerInitialized) return;
-    
-    switch(func) {
-        case FUNC_LOOP:
-            changeSamplerMode(SAMPLER_LOOP);
-            break;
-            
-        case FUNC_HOLD:
-            changeSamplerMode(SAMPLER_HOLD);
-            break;
-            
-        case FUNC_STOP:
-            stopAllSamples();
-            break;
-            
-        case FUNC_VOLUME_UP:
-            dfplayerVolume = constrain(dfplayerVolume + 2, 0, 30);
-            volume = dfplayerVolume;
-            setVolume(dfplayerVolume);
-            break;
-            
-        case FUNC_VOLUME_DN:
-            dfplayerVolume = constrain(dfplayerVolume - 2, 0, 30);
-            volume = dfplayerVolume;
-            setVolume(dfplayerVolume);
-            break;
-            
-        case FUNC_PREV:
-            currentSample = (currentSample - 1 + MAX_SAMPLES) % MAX_SAMPLES;
-            playSample(currentSample);
-            break;
-            
-        case FUNC_NEXT:
-            currentSample = (currentSample + 1) % MAX_SAMPLES;
-            playSample(currentSample);
-            break;
-            
-        case FUNC_CLEAR:
-            stopAllSamples();
-            globalSamplerMode = SAMPLER_ONESHOT;
-            break;
-            
-        default:
-            break;
-    }
-}
-
-void testAllSamples() {
-    if (!samplerInitialized) {
-        Serial.println("⚠ DFPlayer not initialized - skipping sample test");
-        return;
-    }
-    
-    Serial.println("\\n╔════════════════════════════════════════════╗");
-    Serial.println("║  TESTING ALL SAMPLES (8)                   ║");
-    Serial.println("╚════════════════════════════════════════════╝");
-    
-    tft.fillScreen(COLOR_BG);
-    tft.setTextSize(3);
-    tft.setTextColor(COLOR_ACCENT);
-    tft.setCursor(120, 80);
-    tft.println("SAMPLE TEST");
-    
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(80, 130);
-    tft.println("Playing 8 samples...");
-    
-    for (int i = 0; i < MAX_SAMPLES; i++) {
-        Serial.printf("Testing sample %d/8...\\n", i + 1);
-        
-        // Mostrar en pantalla
-        tft.fillRect(80, 170, 320, 40, COLOR_BG);
-        tft.setTextSize(4);
-        tft.setTextColor(COLOR_ACCENT);
-        tft.setCursor(180, 170);
-        tft.printf("SAMPLE %d", i + 1);
-        
-        // Reproducir
-        playSample(i);
-        
-        // Animar LEDs
-        setLED(i, true);
-        
-        delay(800);  // Esperar entre samples
-        
-        setLED(i, false);
-    }
-    
-    stopAllSamples();
-    
-    Serial.println("Sample test complete!\\n");
-    delay(500);
-}
 
 void triggerDrum(int track) {
-    // Si el DFPlayer está disponible, reproducir sample correspondiente
-    if (samplerInitialized && track < MAX_SAMPLES) {
-        playSample(track);
-    }
+    // Enviar comando UDP al MASTER para reproducir el instrumento
+    // La velocity está basada en el volumen de Live Pads (con boost del 25%)
+    int boostedVolume = min((int)(livePadsVolume * 1.25), MAX_VOLUME);
+    int velocity = map(boostedVolume, 0, MAX_VOLUME, 0, 127);
+    velocity = constrain(velocity, 0, 127);
     
+    JsonDocument doc;
+    doc["cmd"] = "trigger";
+    doc["pad"] = track;
+    doc["vel"] = velocity;
+    sendUDPCommand(doc);
+    
+    // Actualizar visualización local
     audioLevels[track] = 100;
     showInstrumentOnTM1638(track);
 }
@@ -1765,41 +1639,36 @@ void handleButtons() {
             lastRepeatTime[i] = currentTime;
             
             if (currentScreen == SCREEN_LIVE) {
-                if (i < 8) {
-                    // S1-S8: Reproducir samples 1-8
-                    if (samplerInitialized) {
-                        playSample(i);
-                        currentSample = i;
-                    } else {
-                        triggerDrum(i);
-                        setLED(i, true);
-                        ledActive[i] = true;
-                        ledOffTime[i] = currentTime + 150;
-                    }
-                } else {
-                    // S9-S16: Funciones del sampler
-                    SamplerFunction func = (SamplerFunction)i;
-                    handleSamplerFunction(func);
-                    setLED(i, true);
-                    ledActive[i] = true;
-                    ledOffTime[i] = currentTime + 200;
-                }
+                // S1-S16: Enviar trigger al MASTER
+                triggerDrum(i);
+                setLED(i, true);
+                ledActive[i] = true;
+                ledOffTime[i] = currentTime + 150;
+                padPressed[i] = true;
+                padPressTime[i] = currentTime;
+                
+                // Redibujar pad con efecto neón
+                drawLivePad(i, true);
                 
                 if (needsFullRedraw) {
                     drawLiveScreen();
                 }
             } else if (currentScreen == SCREEN_SETTINGS) {
                 if (i >= 0 && i < MAX_KITS) {
-                    // S1-S3: Cambiar kit
-                    changeKit(i - currentKit);
+                    // S1-S3: Cambiar kit (enviar al MASTER)
+                    JsonDocument doc;
+                    doc["cmd"] = "kit";
+                    doc["value"] = i;
+                    sendUDPCommand(doc);
+                    currentKit = i;
                     drawSettingsScreen();
                 } else if (i == 3) {
-                    // S4: Toggle WiFi
+                    // S4: Toggle WiFi (local)
                     toggleWebServer();
                     drawSettingsScreen();
                     Serial.printf("► WiFi %s desde Settings (S4)\n", webServerEnabled ? "activado" : "desactivado");
                 } else if (i >= 4 && i < 4 + THEME_COUNT && (i - 4) < THEME_COUNT) {
-                    // S5-S7: Cambiar theme
+                    // S5-S7: Cambiar theme (local)
                     int newTheme = i - 4;
                     if (newTheme != currentTheme) {
                         changeTheme(newTheme - currentTheme);
@@ -1815,39 +1684,13 @@ void handleButtons() {
         }
     }
     
-    // Detectar botones mantenidos (solo en LIVE y modo HOLD)
-    if (currentScreen == SCREEN_LIVE && samplerInitialized) {
-        for (int i = 0; i < 8; i++) {
-            if (buttons & (1 << i)) {
-                unsigned long pressedDuration = currentTime - buttonPressTime[i];
-                
-                // Modo HOLD: Repetir mientras está presionado
-                if (globalSamplerMode == SAMPLER_HOLD && pressedDuration > HOLD_THRESHOLD) {
-                    if ((currentTime - lastRepeatTime[i]) > REPEAT_INTERVAL) {
-                        playSample(i);
-                        lastRepeatTime[i] = currentTime;
-                        
-                        setLED(i, true);
-                        ledActive[i] = true;
-                        ledOffTime[i] = currentTime + 300;
-                    }
-                }
-            } else {
-                // Botón liberado: detener sample si está en modo HOLD
-                if (globalSamplerMode == SAMPLER_HOLD && samples[i].isPlaying) {
-                    samples[i].isPlaying = false;
-                    samples[i].isLooping = false;
-                }
-            }
-        }
-    }
-    
     lastButtonState = buttons;
 }
 
 void handleEncoder() {
     static bool encoderBtnHeld = false;
     static unsigned long encoderBtnPressTime = 0;
+    static int menuAccumulator = 0;  // Acumulador para movimientos del menú
     bool btn = digitalRead(ENCODER_SW);
     unsigned long currentTime = millis();
     
@@ -1880,21 +1723,30 @@ void handleEncoder() {
                     calculateStepInterval();
                     needsHeaderUpdate = true;
                     
+                    // Enviar al MASTER
+                    JsonDocument doc;
+                    doc["cmd"] = "tempo";
+                    doc["value"] = tempo;
+                    sendUDPCommand(doc);
+                    
                     // Mostrar en TM1638
                     char display1[9];
                     snprintf(display1, 9, "BPM %3d ", tempo);
                     tm1.displayText(display1);
                     tm2.displayText("        ");
                     
-                    Serial.printf("► BPM: %d (Encoder Hold)\n", tempo);
+                    Serial.printf("► BPM: %d (Encoder Hold) - Sent to MASTER\n", tempo);
                 }
             }
             // SIN HOLD: navegación normal según pantalla
             else {
                 if (currentScreen == SCREEN_MENU) {
-                    // En menú: sensibilidad media (dividir por 2)
-                    int delta = rawDelta / 2;
-                    if (delta != 0) {
+                    // En menú: usar acumulador para movimientos suaves (umbral de 3)
+                    menuAccumulator += rawDelta;
+                    if (abs(menuAccumulator) >= 3) {
+                        int delta = menuAccumulator / 3;
+                        menuAccumulator %= 3;  // Mantener resto
+                        
                         int oldSelection = menuSelection;
                         menuSelection += delta;
                         if (menuSelection < 0) menuSelection = menuItemCount - 1;
@@ -1917,12 +1769,22 @@ void handleEncoder() {
                     }
                     
                 } else if (currentScreen == SCREEN_SEQUENCER) {
-                    // En sequencer: más sensible (dividir por 2 para precisión perfecta)
+                    // En sequencer: navegación libre entre 16 tracks
+                    // La página cambia automáticamente según el track seleccionado
                     int delta = rawDelta / 2;
                     if (delta != 0) {
                         selectedTrack += delta;
                         if (selectedTrack < 0) selectedTrack = MAX_TRACKS - 1;
                         if (selectedTrack >= MAX_TRACKS) selectedTrack = 0;
+                        
+                        // Actualizar página automáticamente según el track
+                        int newPage = selectedTrack / 8;  // 0-7 = página 0, 8-15 = página 1
+                        if (newPage != sequencerPage) {
+                            sequencerPage = newPage;
+                            needsFullRedraw = true;
+                            Serial.printf("► Page changed to: %d/2 (Tracks %d-%d)\n", 
+                                         sequencerPage + 1, sequencerPage * 8 + 1, sequencerPage * 8 + 8);
+                        }
                         
                         // Mostrar instrumento en TM1638
                         showInstrumentOnTM1638(selectedTrack);
@@ -1994,7 +1856,16 @@ void handlePlayStopButton() {
     if (!playStopPressed && lastPlayStopPressed && (currentTime - lastPlayStopBtnTime > 50)) {
         Serial.printf("► PLAY/STOP BUTTON\n");
         
-        // Funciona en cualquier pantalla
+        // Enviar comando al MASTER
+        JsonDocument doc;
+        if (isPlaying) {
+            doc["cmd"] = "stop";
+        } else {
+            doc["cmd"] = "start";
+        }
+        sendUDPCommand(doc);
+        
+        // Actualizar estado local
         isPlaying = !isPlaying;
         if (!isPlaying) {
             currentStep = 0;
@@ -2109,6 +1980,14 @@ void handleBackButton() {
     if (!backPressed && lastBackPressed && (currentTime - lastBackBtnTime > 50)) {
         Serial.printf("► BACK BUTTON\n");
         
+        // ATAJO ESPECIAL: BACK + ENCODER PRESIONADO = SYNC PATTERN
+        bool encoderPressed = (digitalRead(ENCODER_SW) == HIGH);
+        if (encoderPressed && currentScreen == SCREEN_SEQUENCER) {
+            Serial.println("► ENCODER+BACK = REQUESTING PATTERN SYNC!");
+            requestPatternFromMaster();
+            return;  // No cambiar de pantalla
+        }
+        
         // Desde MENU: mostrar créditos
         if (currentScreen == SCREEN_MENU) {
             changeScreen(SCREEN_CREDITS);
@@ -2179,24 +2058,85 @@ void debugAnalogButtons() {
 }
 
 void handleVolume() {
-    int raw = analogRead(ROTARY_ANGLE_PIN);
-    int newVol = map(raw, 0, 4095, 30, 0);  // Invertido: girar derecha = subir volumen
+    static bool lastToggleBtnState = HIGH;
+    static int lastPotValue = -1;  // Valor del potenciómetro en el último cambio de modo
+    static bool potMoved = true;   // Flag para detectar si el pot se movió después de cambiar modo
     
-    if (abs(newVol - lastVolumeLevel) > 1) {
-        volumeLevel = newVol;
-        lastVolumeLevel = newVol;
+    // Leer botón toggle (pin 14) con pull-up interno
+    bool toggleBtnState = digitalRead(VOLUME_TOGGLE_BTN);
+    
+    // Detectar flanco de bajada (botón presionado)
+    if (toggleBtnState == LOW && lastToggleBtnState == HIGH) {
+        delay(50);  // Debounce
         
-        // Aplicar volumen al DFPlayer
-        if (samplerInitialized) {
-            dfplayerVolume = volumeLevel;
-            setVolume(dfplayerVolume);
-        }
+        // Capturar posición actual del potenciómetro
+        int raw = analogRead(ROTARY_ANGLE_PIN);
+        lastPotValue = map(raw, 0, 4095, MAX_VOLUME, 0);
+        potMoved = false;  // El pot NO se ha movido desde el cambio de modo
         
-        Serial.printf("► Volume: %d/30\n", volumeLevel);
-        showVolumeOnTM1638();
+        // Alternar modo de volumen
+        volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+        
+        Serial.printf("► Volume Mode: %s (pot locked at %d%% until moved)\n", 
+                     volumeMode == VOL_SEQUENCER ? "SEQUENCER" : "LIVE PADS",
+                     lastPotValue);
+        
+        // Mostrar en TM1638
+        tm1.displayText(volumeMode == VOL_SEQUENCER ? "SEQ VOL " : "PAD VOL ");
+        tm2.displayText("        ");
         lastDisplayChange = millis();
-        
+        currentDisplayMode = DISPLAY_VOLUME;
         needsHeaderUpdate = true;
+    }
+    lastToggleBtnState = toggleBtnState;
+    
+    // Leer potenciómetro (0-100%)
+    int raw = analogRead(ROTARY_ANGLE_PIN);
+    int newVol = map(raw, 0, 4095, MAX_VOLUME, 0);  // Invertido: girar derecha = subir volumen
+    
+    // Detectar si el potenciómetro se movió desde el cambio de modo
+    if (!potMoved && abs(newVol - lastPotValue) > 5) {  // Umbral de 5% para detectar movimiento
+        potMoved = true;
+        Serial.println("► Potentiometer moved - volume control unlocked");
+    }
+    
+    // Solo actualizar volumen si el pot se movió después del cambio de modo
+    if (potMoved) {
+        if (volumeMode == VOL_SEQUENCER) {
+            if (abs(newVol - lastSequencerVolume) > 2) {  // Hysteresis de 2%
+                sequencerVolume = newVol;
+                lastSequencerVolume = newVol;
+                
+                // Enviar al MASTER
+                JsonDocument doc;
+                doc["cmd"] = "setSequencerVolume";
+                doc["value"] = sequencerVolume;
+                sendUDPCommand(doc);
+                
+                Serial.printf("► Sequencer Volume: %d%%\n", sequencerVolume);
+                showVolumeOnTM1638();
+                lastDisplayChange = millis();
+                needsHeaderUpdate = true;
+            }
+        } else {
+            if (abs(newVol - lastLivePadsVolume) > 2) {  // Hysteresis de 2%
+                livePadsVolume = newVol;
+                lastLivePadsVolume = newVol;
+                
+                // Enviar al MASTER con boost del 25% (pero limitado a MAX_VOLUME)
+                int boostedVolume = min((int)(livePadsVolume * 1.25), MAX_VOLUME);
+                JsonDocument doc;
+                doc["cmd"] = "setLiveVolume";
+                doc["value"] = boostedVolume;
+                sendUDPCommand(doc);
+                
+                Serial.printf("► Live Pads Volume: %d%% (sent: %d%% +25%% boost)\n", 
+                             livePadsVolume, boostedVolume);
+                showVolumeOnTM1638();
+                lastDisplayChange = millis();
+                needsHeaderUpdate = true;
+            }
+        }
     }
 }
 
@@ -2227,8 +2167,15 @@ void showBPMOnTM1638() {
 void showVolumeOnTM1638() {
     currentDisplayMode = DISPLAY_VOLUME;
     char display1[9], display2[9];
-    snprintf(display1, 9, "VOL  %2d ", volumeLevel);
-    snprintf(display2, 9, "--------");
+    
+    if (volumeMode == VOL_SEQUENCER) {
+        snprintf(display1, 9, "SEQ %3d%%", sequencerVolume);
+        snprintf(display2, 9, "--------");
+    } else {
+        snprintf(display1, 9, "PAD %3d%%", livePadsVolume);
+        snprintf(display2, 9, "--------");
+    }
+    
     tm1.displayText(display1);
     tm2.displayText(display2);
 }
@@ -2283,7 +2230,7 @@ void updateTM1638Displays() {
         bool allOk = diagnostic.tftOk && diagnostic.tm1638_1_Ok && 
                      diagnostic.tm1638_2_Ok && diagnostic.encoderOk;
         tm1.displayText(allOk ? "ALL  OK " : " ERROR  ");
-        tm2.displayText(diagnostic.sdCardOk ? "SD   OK " : "NO   SD ");
+        tm2.displayText(diagnostic.udpConnected ? "UDP  OK " : "NO  UDP ");
     }
 }
 
@@ -2313,8 +2260,24 @@ void updateAudioVisualization() {
             }
         }
         
+        // Manejar tremolo y efecto neón en Live Pads
         if (currentScreen == SCREEN_LIVE) {
-            drawVUMeters();
+            uint16_t buttons = readAllButtons();
+            for (int i = 0; i < 16; i++) {
+                bool isPressed = buttons & (1 << i);
+                
+                if (isPressed && padPressed[i]) {
+                    // Mantener presionado - Tremolo cada 150ms
+                    if (currentTime - padPressTime[i] > 150) {
+                        triggerDrum(i);
+                        padPressTime[i] = currentTime;
+                    }
+                } else if (!isPressed && padPressed[i]) {
+                    // Se soltó el botón - quitar efecto neón
+                    padPressed[i] = false;
+                    drawLivePad(i, false);
+                }
+            }
         }
     }
 }
@@ -2423,10 +2386,10 @@ void drawConsoleBootScreen() {
         "TM1638 #2",
         "Encoder",
         "Buttons",
-        "SD Card",
-        "Audio Kits",
+        "WiFi",
+        "UDP Client",
         "Patterns",
-        "Sequencer"
+        "Ready"
     };
     
     for (int i = 0; i < 10; i++) {
@@ -2650,34 +2613,34 @@ void drawLiveScreen() {
     tft.setTextSize(2);
     tft.setTextColor(COLOR_ACCENT2);
     tft.setCursor(150, 58);
-    tft.println("SAMPLE PADS");
+    tft.println("LIVE PADS");
     
-    // Estado del DFPlayer
+    // Estado de la conexión UDP (simplificado - los volúmenes ya están en header)
     tft.setTextSize(1);
-    if (samplerInitialized) {
+    if (udpConnected) {
         tft.setTextColor(COLOR_SUCCESS);
-        tft.setCursor(340, 65);
-        tft.printf("VOL:%02d", dfplayerVolume);
+        tft.setCursor(350, 65);
+        tft.print("CONNECTED");
     } else {
         tft.setTextColor(COLOR_ERROR);
-        tft.setCursor(340, 65);
-        tft.println("NO DFPLAYER");
+        tft.setCursor(350, 65);
+        tft.print("NO MASTER");
     }
     
-    // ========== SAMPLES S1-S8 ==========
+    // ========== 16 PADS EN FORMATO 4x4 ==========
     const int padW = 108;
-    const int padH = 80;
+    const int padH = 52;
     const int startX = 10;
     const int startY = 88;
     const int spacingX = 8;
-    const int spacingY = 8;
+    const int spacingY = 6;
     
     tft.setTextSize(1);
     tft.setTextColor(COLOR_ACCENT2);
     tft.setCursor(startX, startY - 12);
-    tft.println("SAMPLES [S1-S8]");
+    tft.println("16 PADS [S1-S16]");
     
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 16; i++) {
         int col = i % 4;
         int row = i / 4;
         int x = startX + col * (padW + spacingX);
@@ -2686,116 +2649,63 @@ void drawLiveScreen() {
         // Sombra
         tft.fillRoundRect(x + 2, y + 2, padW, padH, 8, 0x1000);
         
-        // Pad principal
-        uint16_t padColor = COLOR_PRIMARY_LIGHT;
-        if (samples[i].isPlaying) {
-            padColor = COLOR_ACCENT;
-        } else if (i == currentSample) {
-            padColor = COLOR_PRIMARY;
+        // Pad principal con color único por instrumento
+        uint16_t padColor;
+        if (i < MAX_TRACKS) {
+            padColor = getInstrumentColor(i);
+        } else {
+            // Colores para pads 9-16
+            uint16_t extraColors[] = {
+                0xFD20,  // Naranja
+                0xFFE0,  // Amarillo
+                0x07FF,  // Cyan
+                0xF81F,  // Magenta
+                0xA817,  // Púrpura
+                0x2E86,  // Verde claro
+                0x3D8F,  // Azul claro
+                0xFBE0   // Rosa
+            };
+            padColor = extraColors[i - MAX_TRACKS];
         }
         
         tft.fillRoundRect(x, y, padW, padH, 8, padColor);
-        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_ACCENT);
+        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_TEXT);
         
-        // Número del sample
-        tft.fillRoundRect(x + 5, y + 5, 24, 24, 4, COLOR_ACCENT);
+        // Número del pad
+        tft.fillRoundRect(x + 5, y + 5, 22, 22, 4, COLOR_BG);
         tft.setTextSize(2);
-        tft.setTextColor(0x0000);
-        tft.setCursor(x + 11, y + 10);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(x + (i < 9 ? 12 : 9), y + 9);
         tft.printf("%d", i + 1);
         
-        // Nombre
+        // Nombre del instrumento
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(x + 35, y + 10);
-        tft.println("SAMPLE");
-        tft.setCursor(x + 35, y + 22);
-        tft.printf("%03d.WAV", i + 1);
-        
-        // Modo
-        tft.setTextSize(1);
-        tft.setTextColor(samples[i].isLooping ? COLOR_WARNING : COLOR_TEXT_DIM);
-        tft.setCursor(x + 8, y + 40);
-        if (samples[i].isLooping) {
-            tft.println("LOOP");
+        tft.setTextColor(COLOR_BG);
+        tft.setCursor(x + 32, y + 10);
+        if (i < MAX_TRACKS) {
+            // Truncar nombre si es muy largo
+            String instName = String(instrumentNames[i]);
+            if (instName.length() > 10) {
+                instName = instName.substring(0, 10);
+            }
+            tft.println(instName.c_str());
         } else {
-            tft.println("1-SHOT");
-        }
-        
-        // Indicador de reproducción
-        if (samples[i].isPlaying) {
-            tft.fillRoundRect(x + 5, y + padH - 20, padW - 10, 15, 4, COLOR_SUCCESS);
-            tft.setTextSize(1);
-            tft.setTextColor(0x0000);
-            tft.setCursor(x + 30, y + padH - 17);
-            tft.println("PLAYING");
+            tft.printf("PAD %d", i + 1);
         }
         
         // Botón TM1638
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_ACCENT2);
+        tft.setTextColor(COLOR_BG);
         tft.setCursor(x + padW - 20, y + padH - 12);
         tft.printf("S%d", i + 1);
-    }
-    
-    // ========== FUNCIONES S9-S16 ==========
-    const int funcY = 267;
-    const int funcW = 56;
-    const int funcH = 28;
-    const int funcSpacing = 4;
-    
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(startX, funcY - 12);
-    tft.println("FUNCTIONS [S9-S16]");
-    
-    const char* funcLabels[] = {
-        "LOOP",    // S9
-        "HOLD",    // S10
-        "STOP",    // S11
-        "VOL+",    // S12
-        "VOL-",    // S13
-        "PREV",    // S14
-        "NEXT",    // S15
-        "CLEAR"    // S16
-    };
-    
-    for (int i = 0; i < 8; i++) {
-        int x = startX + i * (funcW + funcSpacing);
-        
-        // Fondo del botón
-        uint16_t btnColor = COLOR_PRIMARY;
-        
-        // Destacar modo activo
-        if (i == 0 && globalSamplerMode == SAMPLER_LOOP) {
-            btnColor = COLOR_WARNING;
-        } else if (i == 1 && globalSamplerMode == SAMPLER_HOLD) {
-            btnColor = COLOR_WARNING;
-        }
-        
-        tft.fillRoundRect(x, funcY, funcW, funcH, 5, btnColor);
-        tft.drawRoundRect(x, funcY, funcW, funcH, 5, COLOR_ACCENT);
-        
-        // Texto
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT);
-        int labelLen = strlen(funcLabels[i]);
-        int labelX = x + (funcW - labelLen * 6) / 2;
-        tft.setCursor(labelX, funcY + 4);
-        tft.println(funcLabels[i]);
-        
-        // Número del botón
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(x + funcW - 14, funcY + funcH - 10);
-        tft.printf("%d", 9 + i);
     }
     
     // Footer con instrucciones
     tft.fillRect(0, 305, 480, 15, COLOR_PRIMARY);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(30, 307);
-    tft.println("S1-8:PLAY | S9-16:FUNCTIONS | ENCODER:SELECT | BACK:MENU");
+    tft.setCursor(120, 307);
+    tft.println("S1-16:PLAY PADS | ENCODER:VOLUME | BACK:MENU");
 }
 
 void drawSequencerScreen() {
@@ -2818,28 +2728,55 @@ void drawSequencerScreen() {
         tft.setCursor(60, infoY);
         tft.printf("PATTERN %d", currentPattern + 1);
         
-        tft.setCursor(200, infoY);
+        // Mostrar página actual
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_ACCENT);
+        tft.setCursor(180, infoY + 8);
+        tft.printf("PAGE %d/2", sequencerPage + 1);
+        
+        tft.setTextSize(2);
+        tft.setCursor(240, infoY);
         tft.setTextColor(COLOR_TEXT_DIM);
         tft.print(patterns[currentPattern].name.c_str());
         
         // Mostrar instrumento actual resaltado con su color
-        tft.fillRoundRect(298, infoY - 2, 165, 22, 4, getInstrumentColor(selectedTrack));
+        tft.fillRoundRect(340, infoY - 2, 125, 22, 4, getInstrumentColor(selectedTrack));
         tft.setTextColor(COLOR_BG);
-        tft.setCursor(305, infoY);
+        tft.setCursor(347, infoY);
         String instName = String(instrumentNames[selectedTrack]);
         instName.trim();
         tft.printf("%d:%s", selectedTrack + 1, instName.c_str());
         
+        // BOTÓN PLAY/STOP
         if (isPlaying) {
-            tft.fillRoundRect(400, 56, 70, 24, 4, COLOR_SUCCESS);
+            tft.fillRoundRect(330, 24, 65, 24, 4, COLOR_SUCCESS);
             tft.setTextColor(COLOR_BG);
-            tft.setCursor(412, 60);
+            tft.setCursor(342, 28);
             tft.print("PLAY");
         } else {
-            tft.drawRoundRect(400, 56, 70, 24, 4, COLOR_BORDER);
+            tft.drawRoundRect(330, 24, 65, 24, 4, COLOR_BORDER);
             tft.setTextColor(COLOR_TEXT_DIM);
-            tft.setCursor(412, 60);
+            tft.setCursor(342, 28);
             tft.print("STOP");
+        }
+        
+        // BOTÓN SYNC - Solicitar patrón del MASTER
+        if (udpConnected) {
+            tft.fillRoundRect(400, 24, 70, 24, 4, COLOR_WARNING);
+            tft.setTextColor(COLOR_BG);
+            tft.setTextSize(1);
+            tft.setCursor(405, 27);
+            tft.print("SYNC");
+            tft.setCursor(405, 36);
+            tft.print("MASTER");
+        } else {
+            tft.fillRoundRect(400, 24, 70, 24, 4, 0x2104);
+            tft.setTextColor(COLOR_TEXT_DIM);
+            tft.setTextSize(1);
+            tft.setCursor(405, 27);
+            tft.print("SYNC");
+            tft.setCursor(405, 36);
+            tft.print("NO CON");
         }
     }
     
@@ -2850,6 +2787,10 @@ void drawSequencerScreen() {
     const int labelW = 38;
     
     Pattern& pattern = patterns[currentPattern];
+    
+    // Calcular rango de tracks según página (0-7 o 8-15)
+    int trackStart = sequencerPage * 8;
+    int trackEnd = trackStart + 8;
     
     if (needsFullRedraw) {
         tft.fillRoundRect(gridX - 2, gridY - 2, 468, 210, 8, COLOR_NAVY);
@@ -2863,8 +2804,9 @@ void drawSequencerScreen() {
         }
         
         tft.setTextSize(2);
-        for (int t = 0; t < MAX_TRACKS; t++) {
-            int y = gridY + 2 + t * (cellH + 2);
+        for (int i = 0; i < 8; i++) {
+            int t = trackStart + i;  // Track real (0-7 o 8-15)
+            int y = gridY + 2 + i * (cellH + 2);
             
             // Resaltar track seleccionado con fondo
             if (t == selectedTrack) {
@@ -2890,8 +2832,9 @@ void drawSequencerScreen() {
     // Redibujar etiquetas si cambi\u00f3 el grid (por ejemplo, al mutear)
     if (needsGridUpdate) {
         tft.setTextSize(2);
-        for (int t = 0; t < MAX_TRACKS; t++) {
-            int y = gridY + 2 + t * (cellH + 2);
+        for (int i = 0; i < 8; i++) {
+            int t = trackStart + i;  // Track real
+            int y = gridY + 2 + i * (cellH + 2);
             
             // Limpiar \u00e1rea de etiqueta
             tft.fillRect(gridX, y - 1, labelW - 2, cellH + 2, 
@@ -2910,11 +2853,13 @@ void drawSequencerScreen() {
         }
     }
     
-    for (int t = 0; t < MAX_TRACKS; t++) {
+    // Dibujar celdas del grid solo para tracks visibles (8 tracks por página)
+    for (int i = 0; i < 8; i++) {
+        int t = trackStart + i;  // Track real (0-7 o 8-15)
         for (int s = 0; s < MAX_STEPS; s++) {
             if (needsFullRedraw || needsGridUpdate || (s == currentStep || s == lastStep)) {
                 int x = gridX + labelW + s * (cellW + 1);
-                int y = gridY + 2 + t * (cellH + 2);
+                int y = gridY + 2 + i * (cellH + 2);  // Usar 'i' para posición visual
                 
                 uint16_t color;
                 uint16_t border = COLOR_NAVY;
@@ -2962,7 +2907,9 @@ void drawSequencerScreen() {
         tft.setTextSize(1);
         tft.setTextColor(COLOR_TEXT_DIM);
         tft.setCursor(5, 305);
-        tft.println("S1-S16:TOGGLE | ENC:TRACK | PLAY/STOP | MUTE(HOLD:CLEAR) | BACK");
+        tft.print("S1-16:TOGGLE | ENC:TRACK | PLAY/STOP | MUTE(HOLD:CLEAR) | ");
+        tft.setTextColor(COLOR_WARNING);
+        tft.print("ENCODER+BACK:SYNC");
     }
 }
 
@@ -2975,42 +2922,40 @@ void drawSettingsScreen() {
     tft.setCursor(180, 58);
     tft.println("SETTINGS");
     
-    // ========== COLUMNA IZQUIERDA: DRUM KITS ==========
+    // ========== COLUMNA IZQUIERDA: SAMPLERS INFO ==========
     const int leftX = 20;
     const int sectionY = 95;
     
     tft.setTextSize(2);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(leftX, sectionY);
-    tft.println("DRUM KITS");
+    tft.println("SAMPLERS");
     tft.drawFastHLine(leftX, sectionY + 25, 200, COLOR_BORDER);
     
-    for (int i = 0; i < MAX_KITS; i++) {
-        int y = sectionY + 40 + i * 45;
+    // Mostrar información de samplers cargados
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.setCursor(leftX, sectionY + 35);
+    tft.print("Loaded from MASTER:");
+    
+    // Lista de instrumentos (primeros 8)
+    const char* instrList[] = {"BD", "SD", "CH", "OH", "CP", "CB", "RS", "CL"};
+    for (int i = 0; i < 8; i++) {
+        int y = sectionY + 55 + i * 20;
         
-        if (i == currentKit) {
-            tft.fillRoundRect(leftX, y, 200, 38, 6, COLOR_ACCENT);
-            tft.drawRoundRect(leftX, y, 200, 38, 6, COLOR_ACCENT2);
-            tft.setTextSize(2);
-            tft.setTextColor(COLOR_TEXT);
-        } else {
-            tft.fillRoundRect(leftX, y, 200, 38, 6, COLOR_PRIMARY_LIGHT);
-            tft.setTextSize(2);
-            tft.setTextColor(COLOR_TEXT_DIM);
-        }
+        // Cuadrado de color del instrumento
+        tft.fillRoundRect(leftX + 5, y, 14, 14, 2, getInstrumentColor(i));
         
-        // Número del kit
-        tft.fillCircle(leftX + 20, y + 19, 10, i == currentKit ? COLOR_ACCENT2 : COLOR_PRIMARY);
+        // Nombre del instrumento
         tft.setTextSize(1);
         tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(leftX + 16, y + 13);
-        tft.printf("%d", i + 1);
+        tft.setCursor(leftX + 25, y + 3);
+        tft.printf("%02d: %s", i + 1, instrList[i]);
         
-        // Nombre del kit
-        tft.setTextSize(2);
-        tft.setTextColor(i == currentKit ? COLOR_TEXT : COLOR_TEXT_DIM);
-        tft.setCursor(leftX + 40, y + 11);
-        tft.print(kits[i].name.c_str());
+        // Estado
+        tft.setTextColor(COLOR_SUCCESS);
+        tft.setCursor(leftX + 60, y + 3);
+        tft.print("READY");
     }
     
     // ========== COLUMNA DERECHA: VISUAL THEMES ==========
@@ -3101,24 +3046,16 @@ void drawSettingsScreen() {
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(10, 305);
-    tft.print("S1-S3:KIT");
-    tft.setCursor(85, 305);
-    tft.print("|");
-    tft.setCursor(93, 305);
     tft.setTextColor(webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR);
     tft.print("S4:WiFi");
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(155, 305);
+    tft.setCursor(80, 305);
     tft.print("|");
-    tft.setCursor(163, 305);
+    tft.setCursor(93, 305);
     tft.print("S5-S7:THEME");
-    tft.setCursor(258, 305);
+    tft.setCursor(200, 305);
     tft.print("|");
-    tft.setCursor(266, 305);
-    tft.print("ENC:KIT");
-    tft.setCursor(333, 305);
-    tft.print("|");
-    tft.setCursor(341, 305);
+    tft.setCursor(213, 305);
     tft.print("BACK:MENU");
 }
 
@@ -3140,16 +3077,16 @@ void drawDiagnosticsScreen() {
         "TM1638 #1 (S1-8)", 
         "TM1638 #2 (S9-16)", 
         "ROTARY ENCODER",
-        "ROTARY ANGLE",
-        "SD CARD"
+        "WiFi CONNECTION",
+        "UDP -> MASTER"
     };
     bool status[] = {
         diagnostic.tftOk,
         diagnostic.tm1638_1_Ok,
         diagnostic.tm1638_2_Ok,
         diagnostic.encoderOk,
-        true,
-        diagnostic.sdCardOk
+        WiFi.status() == WL_CONNECTED,
+        diagnostic.udpConnected
     };
     
     for (int i = 0; i < 6; i++) {
@@ -3174,12 +3111,26 @@ void drawDiagnosticsScreen() {
     }
     
     y += 8;
-    tft.fillRoundRect(30, y, 420, 26, 6, COLOR_NAVY);
+    
+    // Panel de información de red
+    tft.fillRoundRect(30, y, 420, 50, 6, COLOR_NAVY);
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(45, y + 9);
-    tft.printf("FILES:%d  VOL:%d/30  16-STEPS  2xTM1638", 
-               diagnostic.filesFound, volumeLevel);
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(45, y + 5);
+    tft.println("NETWORK INFO:");
+    
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(45, y + 20);
+    if (udpConnected) {
+        tft.printf("IP: %s", WiFi.localIP().toString().c_str());
+        tft.setCursor(45, y + 35);
+        tft.printf("MASTER: %s:%d  RSSI: %ddBm", masterIP, udpPort, WiFi.RSSI());
+    } else {
+        tft.setTextColor(COLOR_ERROR);
+        tft.println("NOT CONNECTED TO MASTER");
+        tft.setCursor(45, y + 35);
+        tft.printf("WiFi: %s", WiFi.status() == WL_CONNECTED ? "OK (no UDP)" : "DISCONNECTED");
+    }
     
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT_DIM);
@@ -3205,10 +3156,21 @@ void drawHeader() {
     tft.setCursor(140, 20);
     tft.print("BPM");
     
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(180, 14);
-    tft.printf("VOL %d", volumeLevel);
+    // Mostrar ambos volúmenes con indicador de modo activo
+    tft.setTextSize(1);
+    tft.setTextColor(volumeMode == VOL_SEQUENCER ? COLOR_SUCCESS : COLOR_TEXT_DIM);
+    tft.setCursor(175, 12);
+    tft.printf("SEQ:%d%%", sequencerVolume);
+    
+    tft.setTextColor(volumeMode == VOL_LIVE_PADS ? COLOR_SUCCESS : COLOR_TEXT_DIM);
+    tft.setCursor(175, 24);
+    // Mostrar volumen con boost visual (x1.25)
+    int boostedPadVol = min((int)(livePadsVolume * 1.25), MAX_VOLUME);
+    tft.printf("PAD:%d%%", livePadsVolume);
+    if (boostedPadVol > livePadsVolume) {
+        tft.setTextColor(COLOR_WARNING);
+        tft.printf("+");
+    }
     
     if (currentScreen == SCREEN_SEQUENCER) {
         tft.setTextSize(2);
@@ -3224,32 +3186,7 @@ void drawHeader() {
         tft.print(instName.c_str());
     }
     
-    // Mostrar clientes WiFi conectados con icono (parte superior derecha)
-    if (webServerEnabled) {
-        int clients = WiFi.softAPgetStationNum();
-        
-        // Icono WiFi (3 arcos)
-        uint16_t wifiColor = clients > 0 ? COLOR_SUCCESS : COLOR_ACCENT;
-        tft.drawCircle(400, 26, 2, wifiColor);  // Centro
-        tft.drawArc(400, 26, 6, 3, 210, 330, wifiColor, COLOR_BG);  // Arco 1
-        tft.drawArc(400, 26, 10, 8, 210, 330, wifiColor, COLOR_BG); // Arco 2
-        
-        // Número de clientes
-        tft.setTextSize(2);
-        tft.setTextColor(clients > 0 ? COLOR_SUCCESS : COLOR_TEXT_DIM);
-        tft.setCursor(415, 14);
-        tft.printf("%d", clients);
-    } else {
-        // WiFi desactivado - icono con X roja
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_ERROR);
-        tft.setCursor(390, 18);
-        tft.print("WiFi OFF");
-        // Dibujar X
-        tft.drawLine(398, 8, 408, 18, COLOR_ERROR);
-        tft.drawLine(408, 8, 398, 18, COLOR_ERROR);
-    }
-    
+    // Botón Play/Stop (esquina derecha)
     if (isPlaying) {
         tft.fillCircle(455, 24, 10, COLOR_SUCCESS);
         tft.fillTriangle(450, 18, 450, 30, 460, 24, COLOR_BG);
@@ -3260,27 +3197,87 @@ void drawHeader() {
     }
 }
 
-void drawVUMeters() {
-    const int padW = 112;
-    const int padH = 100;
-    const int startX = 6;
+void drawLivePad(int padIndex, bool highlight) {
+    const int padW = 108;
+    const int padH = 52;
+    const int startX = 10;
     const int startY = 88;
-    const int spacingX = 6;
+    const int spacingX = 8;
     const int spacingY = 6;
     
-    for (int i = 0; i < 8; i++) {
-        int col = i % 4;
-        int row = i / 4;
-        int x = startX + col * (padW + spacingX);
-        int y = startY + row * (padH + spacingY);
-        
-        tft.fillRect(x + 10, y + padH - 15, padW - 20, 8, COLOR_NAVY_LIGHT);
-        
-        if (audioLevels[i] > 0) {
-            int barWidth = map(audioLevels[i], 0, 100, 0, padW - 20);
-            tft.fillRoundRect(x + 10, y + padH - 15, barWidth, 8, 4, COLOR_SUCCESS);
-        }
+    int col = padIndex % 4;
+    int row = padIndex / 4;
+    int x = startX + col * (padW + spacingX);
+    int y = startY + row * (padH + spacingY);
+    
+    // Pad principal con color único por instrumento
+    uint16_t padColor;
+    if (padIndex < MAX_TRACKS) {
+        padColor = getInstrumentColor(padIndex);
+    } else {
+        // Colores para pads 9-16
+        uint16_t extraColors[] = {
+            0xFD20,  // Naranja
+            0xFFE0,  // Amarillo
+            0x07FF,  // Cyan
+            0xF81F,  // Magenta
+            0xA817,  // Púrpura
+            0x2E86,  // Verde claro
+            0x3D8F,  // Azul claro
+            0xFBE0   // Rosa
+        };
+        padColor = extraColors[padIndex - MAX_TRACKS];
     }
+    
+    if (highlight) {
+        // Efecto neón al presionar - brillo intenso
+        // Dibuja múltiples capas para efecto de brillo
+        for (int offset = 4; offset > 0; offset--) {
+            uint16_t glowColor = tft.color565(
+                min(255, (padColor >> 11) * 8 + offset * 30),
+                min(255, ((padColor >> 5) & 0x3F) * 4 + offset * 30),
+                min(255, (padColor & 0x1F) * 8 + offset * 30)
+            );
+            tft.drawRoundRect(x - offset, y - offset, padW + offset*2, padH + offset*2, 8, glowColor);
+        }
+        // Pad más brillante
+        tft.fillRoundRect(x, y, padW, padH, 8, TFT_WHITE);
+        tft.drawRoundRect(x, y, padW, padH, 8, padColor);
+    } else {
+        // Estado normal
+        // Sombra
+        tft.fillRoundRect(x + 2, y + 2, padW, padH, 8, 0x1000);
+        
+        tft.fillRoundRect(x, y, padW, padH, 8, padColor);
+        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_TEXT);
+    }
+    
+    // Número del pad
+    tft.fillRoundRect(x + 5, y + 5, 22, 22, 4, highlight ? padColor : COLOR_BG);
+    tft.setTextSize(2);
+    tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT);
+    tft.setCursor(x + (padIndex < 9 ? 12 : 9), y + 9);
+    tft.printf("%d", padIndex + 1);
+    
+    // Nombre del instrumento
+    tft.setTextSize(1);
+    tft.setTextColor(highlight ? padColor : COLOR_BG);
+    tft.setCursor(x + 32, y + 10);
+    if (padIndex < MAX_TRACKS) {
+        String instName = String(instrumentNames[padIndex]);
+        if (instName.length() > 10) {
+            instName = instName.substring(0, 10);
+        }
+        tft.println(instName.c_str());
+    } else {
+        tft.printf("PAD %d", padIndex + 1);
+    }
+    
+    // Botón TM1638
+    tft.setTextSize(1);
+    tft.setTextColor(highlight ? padColor : COLOR_BG);
+    tft.setCursor(x + padW - 20, y + padH - 12);
+    tft.printf("S%d", padIndex + 1);
 }
 
 void drawCreditsScreen() {
@@ -3387,17 +3384,35 @@ void drawCreditsScreen() {
 void changeTempo(int delta) {
     tempo = constrain(tempo + delta, MIN_BPM, MAX_BPM);
     calculateStepInterval();
+    
+    // Enviar al MASTER
+    JsonDocument doc;
+    doc["cmd"] = "tempo";
+    doc["value"] = tempo;
+    sendUDPCommand(doc);
 }
 
 void changePattern(int delta) {
     currentPattern = (currentPattern + delta + MAX_PATTERNS) % MAX_PATTERNS;
     currentStep = 0;
     needsFullRedraw = true;
+    
+    // Enviar al MASTER
+    JsonDocument doc;
+    doc["cmd"] = "pattern";
+    doc["value"] = currentPattern;
+    sendUDPCommand(doc);
 }
 
 void changeKit(int delta) {
     currentKit = (currentKit + delta + MAX_KITS) % MAX_KITS;
     needsFullRedraw = true;
+    
+    // Enviar al MASTER
+    JsonDocument doc;
+    doc["cmd"] = "kit";
+    doc["value"] = currentKit;
+    sendUDPCommand(doc);
 }
 
 void changeTheme(int delta) {
@@ -3420,10 +3435,15 @@ void changeScreen(Screen newScreen) {
     lastDisplayChange = millis();
     setAllLEDs(0x0000);
     
-    // Si entramos al sequencer, mostrar LEDs del track seleccionado
+    // Si entramos al sequencer, mostrar LEDs del track seleccionado y solicitar patrón
     if (newScreen == SCREEN_SEQUENCER && !isPlaying) {
         updateStepLEDsForTrack(selectedTrack);
         showInstrumentOnTM1638(selectedTrack);
+        
+        // Solicitar patrón actual al MASTER
+        if (udpConnected) {
+            requestPatternFromMaster();
+        }
     }
 }
 
@@ -3435,6 +3455,15 @@ void toggleStep(int track, int step) {
     Serial.printf("► TOGGLE: Track %d, Step %d = %s\n", 
                   track, step, 
                   patterns[currentPattern].steps[track][step] ? "ON" : "OFF");
+    
+    // Enviar al MASTER
+    JsonDocument doc;
+    doc["cmd"] = "toggleStep";
+    doc["pattern"] = currentPattern;
+    doc["track"] = track;
+    doc["step"] = step;
+    doc["state"] = patterns[currentPattern].steps[track][step];
+    sendUDPCommand(doc);
 }
 
 // ============================================
@@ -3449,8 +3478,8 @@ void setupWebServer() {
         Serial.println("► LittleFS montado correctamente");
         
         // Listar archivos para debug
-        File root = LittleFS.open("/");
-        File file = root.openNextFile();
+        fs::File root = LittleFS.open("/");
+        fs::File file = root.openNextFile();
         Serial.println("► Archivos en LittleFS:");
         while(file) {
             Serial.print("  - ");
@@ -3540,7 +3569,6 @@ void setupWebServer() {
     server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
         if (isPlaying) {
             isPlaying = false;
-            stopAllSamples();
             currentStep = 0;
             setAllLEDs(0x0000);
             Serial.println("► STOP (Web)");
@@ -3552,7 +3580,6 @@ void setupWebServer() {
     server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request){
         isPlaying = !isPlaying;
         if (!isPlaying) {
-            stopAllSamples();
             currentStep = 0;
             setAllLEDs(0x0000);
         }
@@ -3570,7 +3597,14 @@ void setupWebServer() {
             int newTempo = request->getParam("value")->value().toInt();
             tempo = constrain(newTempo, MIN_BPM, MAX_BPM);
             stepInterval = (60000 / tempo) / 4;
-            Serial.printf("► TEMPO set: %d BPM (Web)\n", tempo);
+            
+            // Enviar al MASTER
+            JsonDocument doc;
+            doc["cmd"] = "tempo";
+            doc["value"] = tempo;
+            sendUDPCommand(doc);
+            
+            Serial.printf("► TEMPO set: %d BPM (Web) - Sent to MASTER\n", tempo);
         }
         request->send(200, "application/json", "{\"bpm\":" + String(tempo) + "}");
     });
@@ -3648,8 +3682,13 @@ void setupWebServer() {
         if (request->hasParam("value")) {
             int newVolume = request->getParam("value")->value().toInt();
             volume = constrain(newVolume, 0, 30);
-            dfplayerVolume = volume;
-            setVolume(dfplayerVolume);
+            
+            // Enviar al MASTER
+            JsonDocument doc;
+            doc["cmd"] = "setVolume";
+            doc["value"] = volume;
+            sendUDPCommand(doc);
+            
             Serial.printf("► VOLUME set: %d (Web)\n", volume);
         }
         request->send(200, "application/json", "{\"volume\":" + String(volume) + "}");
@@ -3710,12 +3749,55 @@ void setupWebServer() {
         if (request->hasParam("track")) {
             int track = request->getParam("track")->value().toInt();
             if (track >= 0 && track < MAX_TRACKS) {
-                // Reproducir sample
-                playSample(track);
-                Serial.printf("► SAMPLE %d triggered (Web)\n", track + 1);
+                // Enviar trigger al MASTER
+                triggerDrum(track);
+                Serial.printf("► PAD %d triggered (Web)\n", track + 1);
             }
         }
         request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    
+    // Recibir patrón completo del MASTER (para sincronización)
+    server.on("/syncpattern", HTTP_POST, [](AsyncWebServerRequest *request){
+        // Este endpoint recibe el patrón completo del MASTER
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+        // Parsear JSON con el patrón
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, data, len);
+        
+        if (!error) {
+            int patternNum = doc["pattern"] | currentPattern;
+            
+            Serial.printf("\n► RECEIVING PATTERN %d FROM MASTER (%dx%d)...\n", 
+                         patternNum + 1, MAX_TRACKS, MAX_STEPS);
+            
+            // Cargar patrón
+            if (doc["data"].is<JsonArray>()) {
+                JsonArray dataArray = doc["data"].as<JsonArray>();
+                int t = 0;
+                for (JsonArray trackData : dataArray) {
+                    if (t < MAX_TRACKS) {
+                        int s = 0;
+                        for (bool stepValue : trackData) {
+                            if (s < MAX_STEPS) {
+                                patterns[patternNum].steps[t][s] = stepValue;
+                                s++;
+                            }
+                        }
+                        t++;
+                    }
+                }
+            }
+            
+            // Imprimir patrón recibido para debug
+            printReceivedPattern(patternNum);
+            
+            needsFullRedraw = true;
+            Serial.println("✓ Pattern synchronized from MASTER");
+        } else {
+            Serial.printf("✗ JSON parse error: %s\n", error.c_str());
+        }
     });
     
     // ========== ENDPOINTS DE DIAGNÓSTICO ==========
@@ -3755,12 +3837,12 @@ void setupWebServer() {
         json += ",\"tm1638_1\":" + String(diagnostic.tm1638_1_Ok ? "true" : "false");
         json += ",\"tm1638_2\":" + String(diagnostic.tm1638_2_Ok ? "true" : "false");
         json += ",\"encoder\":" + String(diagnostic.encoderOk ? "true" : "false");
-        json += ",\"dfplayer\":" + String(diagnostic.dfplayerOk ? "true" : "false");
+        json += ",\"udpConnected\":" + String(diagnostic.udpConnected ? "true" : "false");
         json += "},";
         
         // RED808 Status
         json += "\"red808\":{";
-        json += "\"version\":\"V5\"";
+        json += "\"version\":\"V6-SURFACE\"";
         json += ",\"bpm\":" + String(tempo);
         json += ",\"pattern\":" + String(currentPattern);
         json += ",\"kit\":" + String(currentKit);
@@ -3778,7 +3860,7 @@ void setupWebServer() {
         json += "\"uptime\":" + String(millis() / 1000);
         json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
         json += ",\"wifiClients\":" + String(WiFi.softAPgetStationNum());
-        json += ",\"version\":\"RED808 V5\"";
+        json += ",\"version\":\"RED808 V6-SURFACE\"";
         json += "}";
         request->send(200, "application/json", json);
     });
