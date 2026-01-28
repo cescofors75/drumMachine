@@ -538,11 +538,11 @@ function triggerSample(track) {
     // Enviar trigger al ESP32
     sendCommand('/trigger', { track: track });
     
-    // Feedback visual
+    // Feedback visual con duración aumentada
     const pad = document.querySelector(`.live-pad[data-track="${track}"]`);
     if (pad) {
         pad.classList.add('active');
-        setTimeout(() => pad.classList.remove('active'), 200);
+        setTimeout(() => pad.classList.remove('active'), 150);
     }
     
     console.log(`Sample ${track + 1} triggered`);
@@ -769,16 +769,28 @@ function updateUIFromESP32(data) {
 
 function updatePlayingStep(step) {
     // Highlight en grid - resaltar columna del step actual
+    // Primero limpiar todos los estados de playing
+    document.querySelectorAll('.step-cell.playing').forEach(cell => {
+        cell.classList.remove('playing');
+    });
+    document.querySelectorAll('.step-number.active').forEach(num => {
+        num.classList.remove('active');
+    });
+    
+    // Luego aplicar a los elementos del step actual
     if (isPlaying) {
         document.querySelectorAll('.step-cell').forEach(cell => {
             const cellStep = parseInt(cell.dataset.step);
-            cell.classList.toggle('playing', cellStep === step);
+            if (cellStep === step) {
+                cell.classList.add('playing');
+            }
         });
         
         // Resaltar número de step
-        document.querySelectorAll('.step-number').forEach((num, idx) => {
-            num.classList.toggle('active', idx === step);
-        });
+        const stepNumbers = document.querySelectorAll('.step-number');
+        if (stepNumbers[step]) {
+            stepNumbers[step].classList.add('active');
+        }
     }
 }
 
@@ -898,3 +910,48 @@ function initializeWiFiControls() {
     setInterval(updateWiFiStatus, 2000);
 }
 
+// ============================================
+// ACTUALIZAR INFO ADICIONAL EN HEADER/FOOTER
+// ============================================
+let startTime = Date.now();
+
+function updateHeaderFooterInfo() {
+    // Calcular uptime
+    const uptime = Math.floor((Date.now() - startTime) / 1000);
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    const seconds = uptime % 60;
+    
+    // Actualizar uptime en header (formato corto HH:MM)
+    const headerUptime = document.getElementById('headerUptime');
+    if (headerUptime) {
+        headerUptime.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+    }
+    
+    // Actualizar uptime en settings (formato largo HH:MM:SS)
+    const uptimeDisplay = document.getElementById('uptimeDisplay');
+    if (uptimeDisplay) {
+        uptimeDisplay.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    
+    // Simular memoria (en una implementación real vendría del ESP32)
+    // Por ahora mostramos un valor fijo
+    const headerMemory = document.getElementById('headerMemory');
+    if (headerMemory) {
+        headerMemory.textContent = '256K';
+    }
+    
+    const freeMemory = document.getElementById('freeMemory');
+    const memoryBar = document.getElementById('memoryBar');
+    if (freeMemory && memoryBar) {
+        freeMemory.textContent = '256 KB';
+        memoryBar.style.width = '65%'; // 65% libre
+    }
+    
+    // Actualizar latencia simulada (en producción vendría de ping real)
+    const footerLatency = document.getElementById('footerLatency');
+    if (footerLatency) {
+        const latency = Math.floor(Math.random() * 20) + 5; // 5-25ms simulado
+        footerLatency.textContent = `~ ${latency}ms`;
+    }
+}

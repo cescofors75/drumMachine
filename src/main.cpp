@@ -195,7 +195,7 @@ enum Screen {
     SCREEN_SEQUENCER,
     SCREEN_SETTINGS,
     SCREEN_DIAGNOSTICS,
-    SCREEN_CREDITS
+    SCREEN_PATTERNS
 };
 
 enum DisplayMode {
@@ -272,6 +272,20 @@ const char* password = "red808esp32"; // Password del MASTER
 const char* masterIP = "192.168.4.1"; // IP del MASTER
 const int udpPort = 8888;              // Puerto UDP del MASTER
 
+// CONFIGURACIÓN DE IP ESTÁTICA PARA SLAVES (opcional pero recomendado)
+// Para evitar conflictos de IP entre múltiples slaves y clientes web:
+// - Web browsers: obtendrán IPs dinámicas desde .2 en adelante
+// - Slave 1 (Surface): configurar IP estática .50 (descomentar líneas abajo)
+// - Slave 2 (otro dispositivo): configurar IP estática .51
+// Descomenta y configura estas líneas en cada slave:
+/*
+IPAddress local_IP(192, 168, 4, 50);  // Cambiar último número para cada slave
+IPAddress gateway(192, 168, 4, 1);
+IPAddress subnet(255, 255, 255, 0);
+// Luego en setupWiFiAndUDP() agregar antes de WiFi.begin():
+// WiFi.config(local_IP, gateway, subnet);
+*/
+
 WiFiUDP udp;
 AsyncWebServer server(80);
 bool webServerEnabled = false;
@@ -326,7 +340,7 @@ int lastAdcValue = -1;
 // UDP connection state
 bool udpConnected = false;
 unsigned long lastUdpCheck = 0;
-const unsigned long UDP_CHECK_INTERVAL = 5000;
+const unsigned long UDP_CHECK_INTERVAL = 30000;  // 30 segundos entre intentos de reconexión
 
 // Variables para manejo de botones
 uint16_t lastButtonState = 0;
@@ -425,7 +439,9 @@ void drawLiveScreen();
 void drawSequencerScreen();
 void drawSettingsScreen();
 void drawDiagnosticsScreen();
-void drawCreditsScreen();
+void drawPatternsScreen();
+void drawSinglePattern(int patternIndex, bool isSelected);
+void drawSyncingScreen();
 void drawHeader();
 void drawLivePad(int padIndex, bool highlight);
 void updateTM1638Displays();
@@ -539,13 +555,43 @@ void setupWiFiAndUDP() {
     Serial.printf("  Master IP: %s\n", masterIP);
     Serial.printf("  UDP Port: %d\n", udpPort);
     
+    // PASO 1: Escanear redes WiFi disponibles
+    Serial.println("\n[1/3] Scanning WiFi networks...");
+    int n = WiFi.scanNetworks();
+    Serial.printf("  Found %d networks:\n", n);
+    
+    bool masterFound = false;
+    for (int i = 0; i < n; i++) {
+        String foundSSID = WiFi.SSID(i);
+        int32_t rssi = WiFi.RSSI(i);
+        Serial.printf("    %d: %s (RSSI: %d)%s\n", 
+                     i + 1, foundSSID.c_str(), rssi,
+                     (foundSSID == ssid) ? " ← MASTER!" : "");
+        if (foundSSID == ssid) {
+            masterFound = true;
+            Serial.printf("  ✓ MASTER '%s' is visible! Signal: %d dBm\n", ssid, rssi);
+        }
+    }
+    
+    if (!masterFound) {
+        Serial.printf("  ✗ WARNING: MASTER '%s' NOT FOUND in scan!\n", ssid);
+        Serial.println("    Check if MASTER is powered on and AP is active.");
+    }
+    
+    // PASO 2: Intentar conectar al MASTER
+    Serial.println("\n[2/3] Connecting to MASTER...");
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
     
+    // Esperar hasta 15 segundos (30 intentos x 500ms)
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    int maxAttempts = 30;  // 15 segundos total
+    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
         delay(500);
         Serial.print(".");
+        if (attempts % 10 == 9) {
+            Serial.printf(" %d/%ds\n", (attempts + 1) / 2, maxAttempts / 2);
+        }
         attempts++;
     }
     
@@ -553,7 +599,11 @@ void setupWiFiAndUDP() {
         Serial.println("\n✓ WiFi connected!");
         Serial.print("  IP Address: ");
         Serial.println(WiFi.localIP());
+        Serial.printf("  Signal strength: %d dBm\n", WiFi.RSSI());
+        Serial.printf("  MAC Address: %s\n", WiFi.macAddress().c_str());
         
+        // PASO 3: Inicializar UDP y enviar hello
+        Serial.println("\n[3/3] Initializing UDP communication...");
         udp.begin(udpPort);
         udpConnected = true;
         diagnostic.udpConnected = true;
@@ -566,16 +616,41 @@ void setupWiFiAndUDP() {
         
         Serial.println("✓ UDP initialized - Ready to send commands");
         
+        // Sonido de confirmación al conectar: reproducir 3 samples rápidos
+        for (int i = 0; i < 3; i++) {
+            // Enviar comando para reproducir CLAP (sample 4)
+            JsonDocument triggerDoc;
+            triggerDoc["cmd"] = "trigger";
+            triggerDoc["track"] = 4;  // CLAP
+            sendUDPCommand(triggerDoc);
+            delay(100);
+        }
+        Serial.println("♪ Connection confirmed with audio feedback");
+        
         // Solicitar patrón actual al MASTER automáticamente
         delay(100);  // Dar tiempo al MASTER para procesar hello
         requestPatternFromMaster();
         Serial.println("► Auto-requesting pattern from MASTER...");
     } else {
         Serial.println("\n✗ WiFi connection FAILED");
-        Serial.println("  Will retry in background...");
+        Serial.printf("  Attempts: %d/%d (%.1f seconds)\n", attempts, maxAttempts, attempts * 0.5);
+        Serial.printf("  WiFi Status: %d\n", WiFi.status());
+        Serial.println("\n  TROUBLESHOOTING:");
+        if (!masterFound) {
+            Serial.println("    → MASTER not detected in WiFi scan");
+            Serial.println("    → Verify MASTER device is powered ON");
+            Serial.println("    → Check MASTER has WiFi AP active");
+        } else {
+            Serial.println("    → MASTER detected but connection failed");
+            Serial.println("    → Check WiFi password is correct");
+            Serial.println("    → Try moving devices closer together");
+            Serial.println("    → Check MASTER is not overloaded");
+        }
+        Serial.println("  Will auto-retry every 30 seconds...\n");
         udpConnected = false;
         diagnostic.udpConnected = false;
-        diagnostic.lastError = "WiFi connection failed";
+        diagnostic.lastError = masterFound ? "Connection timeout" : "Master not found";
+        lastUdpCheck = millis();  // Iniciar timer de reintento
     }
 }
 
@@ -685,10 +760,43 @@ void receiveUDPData() {
                         Serial.println("✓ Pattern synchronized successfully!");
                         Serial.println("═══════════════════════════════════════\n");
                     } else {
-                        Serial.printf("✗ Invalid pattern data: %s\n", 
-                                     data ? "empty array" : "missing data field");
+                        Serial.println("✗ No pattern data received");
                     }
                 }
+                
+                // Actualización del step actual (para sincronizar visualización)
+                else if (strcmp(cmd, "step_update") == 0) {
+                    int newStep = doc["step"] | 0;
+                    if (newStep != currentStep) {
+                        currentStep = newStep;
+                        // Actualizar visualización si estamos en pantalla sequencer
+                        if (currentScreen == SCREEN_SEQUENCER) {
+                            needsGridUpdate = true;
+                        }
+                        Serial.printf("► Step updated: %d\n", currentStep + 1);
+                    }
+                }
+                
+                // Estado play/stop del MASTER
+                else if (strcmp(cmd, "play_state") == 0) {
+                    bool masterPlaying = doc["playing"] | false;
+                    if (masterPlaying != isPlaying) {
+                        isPlaying = masterPlaying;
+                        
+                        // Reset step timer cuando inicia play
+                        if (isPlaying) {
+                            lastStepTime = millis();
+                            currentStep = 0;  // Reiniciar desde step 0
+                        }
+                        
+                        if (currentScreen == SCREEN_SEQUENCER) {
+                            needsHeaderUpdate = true;
+                            needsGridUpdate = true;
+                        }
+                        Serial.printf("► Play state: %s\n", isPlaying ? "PLAYING" : "STOPPED");
+                    }
+                }
+                
                 // Sincronizar BPM
                 else if (strcmp(cmd, "tempo_sync") == 0) {
                     int newTempo = doc["value"];
@@ -778,12 +886,29 @@ void calculateStepInterval() {
 void enableWebServer() {
     if (!webServerEnabled) {
         WiFi.mode(WIFI_AP);
+        
+        // Configurar IP estática del AP y rango DHCP para evitar conflictos
+        IPAddress local_IP(192, 168, 4, 1);
+        IPAddress gateway(192, 168, 4, 1);
+        IPAddress subnet(255, 255, 255, 0);
+        
+        // Configurar el servidor DHCP para asignar IPs desde .10 hasta .20
+        // Esto evita conflictos con IPs fijas en .2, .3, etc.
+        WiFi.softAPConfig(local_IP, gateway, subnet);
+        
         WiFi.softAP(ssid, password);
+        
+        // Configuración DHCP: inicio en .10, asigna hasta 11 direcciones (.10 a .20)
+        // Esto deja .2-.9 libres para dispositivos con IP fija
+        // Nota: softAPdhcps() requiere compilación con opciones específicas
+        // Por defecto ESP32 asignará desde .2, pero con 11 clientes max ayuda
+        
         server.begin();
         webServerEnabled = true;
         needsHeaderUpdate = true;
         Serial.println("► WiFi y Servidor Web ACTIVADOS");
         Serial.printf("► IP Address: %s\n", WiFi.softAPIP().toString().c_str());
+        Serial.println("► DHCP range: 192.168.4.2 - 192.168.4.254");
     }
 }
 
@@ -931,8 +1056,8 @@ void setupSDCard() {
         
         int totalFiles = 0;
         for (int kit = 1; kit <= 3; kit++) {
-            char path[10];
-            snprintf(path, 10, "/%02d", kit);
+            char path[20];
+            snprintf(path, sizeof(path), "/%02d", kit);
             File dir = SD.open(path);
             if (dir && dir.isDirectory()) {
                 File file = dir.openNextFile();
@@ -1056,8 +1181,8 @@ void setupSDCard() {
         // Contar archivos
         int totalFiles = 0;
         for (int kit = 1; kit <= 3; kit++) {
-            char path[10];
-            snprintf(path, 10, "/sd/%02d", kit); // IMPORTANTE: Agregar /sd/ al path
+            char path[20];
+            snprintf(path, sizeof(path), "/sd/%02d", kit); // IMPORTANTE: Agregar /sd/ al path
             File dir = SD.open(path);
             if (dir && dir.isDirectory()) {
                 File file = dir.openNextFile();
@@ -1504,11 +1629,16 @@ void loop() {
     // Reconectar WiFi si se pierde la conexión
     if (!udpConnected && (currentTime - lastUdpCheck > UDP_CHECK_INTERVAL)) {
         lastUdpCheck = currentTime;
-        Serial.println("Checking WiFi connection...");
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("Reconnecting to MASTER...");
-            setupWiFiAndUDP();
-        }
+        Serial.println("\n═══ AUTO-RETRY WiFi CONNECTION ═══");
+        
+        // Mostrar pantalla de sincronización
+        drawSyncingScreen();
+        
+        // Intentar reconectar
+        setupWiFiAndUDP();
+        
+        // Restaurar pantalla anterior
+        needsFullRedraw = true;
     }
     
     updateAudioVisualization();
@@ -1530,8 +1660,8 @@ void loop() {
             case SCREEN_DIAGNOSTICS:
                 drawDiagnosticsScreen();
                 break;
-            case SCREEN_CREDITS:
-                drawCreditsScreen();
+            case SCREEN_PATTERNS:
+                drawPatternsScreen();
                 break;
             default:
                 break;
@@ -1561,11 +1691,27 @@ void loop() {
 // SEQUENCER - SOLO VISUALIZACIÓN (No audio local)
 // ============================================
 void updateSequencer() {
-    // IMPORTANTE: Este SLAVE no reproduce audio localmente
-    // Solo actualiza la visualización basándose en el step sync del MASTER
-    // El MASTER es quien ejecuta el sequencer real
+    // SLAVE: Simular avance de steps basándose en tempo cuando está en play
+    // (si el MASTER no envía step_update, el SLAVE lo calcula localmente)
     
-    // Solo actualizar LEDs basándose en currentStep (sincronizado via UDP)
+    if (isPlaying) {
+        unsigned long currentTime = millis();
+        
+        // Calcular intervalo entre steps basado en tempo actual
+        unsigned long stepInterval = (60000 / tempo) / 4;  // 4 steps por beat (16th notes)
+        
+        if (currentTime - lastStepTime >= stepInterval) {
+            lastStepTime = currentTime;
+            currentStep = (currentStep + 1) % MAX_STEPS;
+            
+            // Forzar actualización de visualización en sequencer
+            if (currentScreen == SCREEN_SEQUENCER) {
+                needsGridUpdate = true;
+            }
+        }
+    }
+    
+    // Actualizar LEDs basándose en currentStep
     updateStepLEDs();
 }
 
@@ -1680,6 +1826,14 @@ void handleButtons() {
                 toggleStep(selectedTrack, i);
                 updateStepLEDsForTrack(selectedTrack);
                 needsGridUpdate = true;  // Solo actualizar grid, no full redraw
+            } else if (currentScreen == SCREEN_PATTERNS) {
+                // S1-S6: Seleccionar patrón (máximo 6 patrones)
+                if (i < 6) {
+                    currentPattern = i;
+                    changePattern(0);  // Enviar al MASTER y solicitar sync
+                    needsFullRedraw = true;
+                    Serial.printf("► Pattern selected: %d\n", currentPattern + 1);
+                }
             }
         }
     }
@@ -1705,6 +1859,10 @@ void handleEncoder() {
     
     // isHolding = TRUE solo si está PRESIONADO más de 300ms
     bool isHolding = encoderBtnHeld && (currentTime - encoderBtnPressTime > 300);
+    
+    // Detectar si el botón BACK está presionado (para BACK+Encoder)
+    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
+    bool backPressed = (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX);
     
     // Manejar rotación del encoder
     if (encoderChanged) {
@@ -1768,6 +1926,34 @@ void handleEncoder() {
                         Serial.printf("► Kit: %d\n", currentKit);
                     }
                     
+                } else if (currentScreen == SCREEN_SETTINGS) {
+                    // En settings: navegar entre opciones (Drum Kits, Themes, etc.)
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        // Navegar por drum kits con el encoder
+                        changeKit(delta);
+                        Serial.printf("► Kit: %d\n", currentKit);
+                    }
+                    
+                } else if (currentScreen == SCREEN_PATTERNS) {
+                    // En pantalla de patrones: navegar con encoder
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        int oldPattern = currentPattern;
+                        currentPattern += delta;
+                        
+                        // Limitar a 6 patrones (0-5)
+                        if (currentPattern < 0) currentPattern = 5;
+                        if (currentPattern > 5) currentPattern = 0;
+                        
+                        if (oldPattern != currentPattern) {
+                            // Redibujar solo los 2 patrones que cambiaron (sin parpadeo)
+                            drawSinglePattern(oldPattern, false);  // Deseleccionar anterior
+                            drawSinglePattern(currentPattern, true);  // Seleccionar nuevo
+                            Serial.printf("► Pattern selected: %d\n", currentPattern + 1);
+                        }
+                    }
+                    
                 } else if (currentScreen == SCREEN_SEQUENCER) {
                     // En sequencer: navegación libre entre 16 tracks
                     // La página cambia automáticamente según el track seleccionado
@@ -1823,6 +2009,11 @@ void handleEncoder() {
                     case 2: changeScreen(SCREEN_SETTINGS); break;
                     case 3: changeScreen(SCREEN_DIAGNOSTICS); break;
                 }
+                
+            } else if (currentScreen == SCREEN_PATTERNS) {
+                // En pantalla de patrones: Enter confirma selección
+                changePattern(0);  // Enviar al MASTER y solicitar sync
+                Serial.printf("► Pattern confirmed: %d\n", currentPattern + 1);
                 
             } else if (currentScreen == SCREEN_SEQUENCER) {
                 // En sequencer: Play/Stop
@@ -1988,12 +2179,12 @@ void handleBackButton() {
             return;  // No cambiar de pantalla
         }
         
-        // Desde MENU: mostrar créditos
+        // Desde MENU: mostrar selección de patrones
         if (currentScreen == SCREEN_MENU) {
-            changeScreen(SCREEN_CREDITS);
+            changeScreen(SCREEN_PATTERNS);
         }
-        // Desde CREDITS: volver a MENU
-        else if (currentScreen == SCREEN_CREDITS) {
+        // Desde PATTERNS: volver a MENU
+        else if (currentScreen == SCREEN_PATTERNS) {
             changeScreen(SCREEN_MENU);
         }
         // Desde cualquier otra pantalla: volver al menú
@@ -2552,10 +2743,27 @@ void drawMainMenu() {
     tft.fillRect(0, 0, 480, 50, COLOR_NAVY);
     tft.drawFastHLine(0, 50, 480, COLOR_ACCENT);
     
+    // Título
     tft.setTextSize(4);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(150, 10);
     tft.println("RED808");
+    
+    // Info adicional en header
+    tft.setTextSize(1);
+    tft.setTextColor(udpConnected ? COLOR_SUCCESS : COLOR_ERROR);
+    tft.setCursor(10, 10);
+    tft.print(udpConnected ? "MASTER OK" : "NO MASTER");
+    
+    // Uptime
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.setCursor(10, 23);
+    uint32_t uptimeSeconds = millis() / 1000;
+    tft.printf("UP: %02d:%02d:%02d", uptimeSeconds / 3600, (uptimeSeconds % 3600) / 60, uptimeSeconds % 60);
+    
+    // Memoria
+    tft.setCursor(10, 36);
+    tft.printf("RAM: %dK", ESP.getFreeHeap() / 1024);
     
     int itemHeight = 52;
     int startY = 70;
@@ -2610,102 +2818,75 @@ void drawLiveScreen() {
     tft.fillScreen(COLOR_BG);
     drawHeader();
     
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(150, 58);
-    tft.println("LIVE PADS");
-    
-    // Estado de la conexión UDP (simplificado - los volúmenes ya están en header)
-    tft.setTextSize(1);
-    if (udpConnected) {
-        tft.setTextColor(COLOR_SUCCESS);
-        tft.setCursor(350, 65);
-        tft.print("CONNECTED");
-    } else {
-        tft.setTextColor(COLOR_ERROR);
-        tft.setCursor(350, 65);
-        tft.print("NO MASTER");
-    }
-    
-    // ========== 16 PADS EN FORMATO 4x4 ==========
-    const int padW = 108;
-    const int padH = 52;
-    const int startX = 10;
-    const int startY = 88;
-    const int spacingX = 8;
+    // ========== 16 PADS EN FORMATO 4x4 CON DISEÑO PROFESIONAL ==========
+    const int padW = 110;
+    const int padH = 54;
+    const int startX = 14;
+    const int startY = 60;  // Más arriba sin el título
+    const int spacingX = 7;
     const int spacingY = 6;
     
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(startX, startY - 12);
-    tft.println("16 PADS [S1-S16]");
-    
+    // Dibujar los 16 pads con diseño minimalista
     for (int i = 0; i < 16; i++) {
         int col = i % 4;
         int row = i / 4;
         int x = startX + col * (padW + spacingX);
         int y = startY + row * (padH + spacingY);
         
-        // Sombra
-        tft.fillRoundRect(x + 2, y + 2, padW, padH, 8, 0x1000);
+        // Color del instrumento (oscurecido para look profesional)
+        uint16_t baseColor = getInstrumentColor(i);
         
-        // Pad principal con color único por instrumento
-        uint16_t padColor;
-        if (i < MAX_TRACKS) {
-            padColor = getInstrumentColor(i);
-        } else {
-            // Colores para pads 9-16
-            uint16_t extraColors[] = {
-                0xFD20,  // Naranja
-                0xFFE0,  // Amarillo
-                0x07FF,  // Cyan
-                0xF81F,  // Magenta
-                0xA817,  // Púrpura
-                0x2E86,  // Verde claro
-                0x3D8F,  // Azul claro
-                0xFBE0   // Rosa
-            };
-            padColor = extraColors[i - MAX_TRACKS];
-        }
+        // Oscurecer el color para fondo más sutil (reducir brillo 60%)
+        uint8_t r = ((baseColor >> 11) & 0x1F) * 5; // Reducir a 40%
+        uint8_t g = ((baseColor >> 5) & 0x3F) * 2;  // Reducir a 40%
+        uint8_t b = (baseColor & 0x1F) * 5;         // Reducir a 40%
+        uint16_t darkColor = tft.color565(r, g, b);
         
-        tft.fillRoundRect(x, y, padW, padH, 8, padColor);
-        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_TEXT);
+        // Fondo del pad oscuro con borde sutil
+        tft.fillRoundRect(x, y, padW, padH, 5, darkColor);
+        tft.drawRoundRect(x, y, padW, padH, 5, baseColor);
         
-        // Número del pad
-        tft.fillRoundRect(x + 5, y + 5, 22, 22, 4, COLOR_BG);
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(x + (i < 9 ? 12 : 9), y + 9);
+        // Borde izquierdo con color del instrumento (acento)
+        tft.fillRect(x + 1, y + 1, 3, padH - 2, baseColor);
+        
+        // Número del pad (pequeño, arriba izquierda)
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(x + 8, y + 5);
         tft.printf("%d", i + 1);
         
-        // Nombre del instrumento
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_BG);
-        tft.setCursor(x + 32, y + 10);
-        if (i < MAX_TRACKS) {
-            // Truncar nombre si es muy largo
-            String instName = String(instrumentNames[i]);
-            if (instName.length() > 10) {
-                instName = instName.substring(0, 10);
-            }
-            tft.println(instName.c_str());
-        } else {
-            tft.printf("PAD %d", i + 1);
+        // Nombre del instrumento (centro, bold)
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_TEXT);
+        String instName = String(instrumentNames[i]);
+        instName.trim();
+        if (instName.length() > 6) {
+            instName = instName.substring(0, 6);
         }
+        // Centrar texto
+        int textWidth = instName.length() * 12;
+        tft.setCursor(x + (padW - textWidth) / 2, y + 18);
+        tft.print(instName);
         
-        // Botón TM1638
+        // Track name abreviado (abajo, pequeño)
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_BG);
-        tft.setCursor(x + padW - 20, y + padH - 12);
-        tft.printf("S%d", i + 1);
+        tft.setTextColor(baseColor);
+        tft.setCursor(x + padW - 18, y + padH - 12);
+        tft.print(trackNames[i]);
     }
     
     // Footer con instrucciones
-    tft.fillRect(0, 305, 480, 15, COLOR_PRIMARY);
+    tft.fillRect(0, 302, 480, 18, COLOR_PRIMARY);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(120, 307);
-    tft.println("S1-16:PLAY PADS | ENCODER:VOLUME | BACK:MENU");
+    tft.setCursor(30, 307);
+    tft.print("S1-S16: PLAY INSTRUMENTS");
+    tft.setTextColor(COLOR_WARNING);
+    tft.setCursor(230, 307);
+    tft.print("VOLUME: KNOB");
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(360, 307);
+    tft.print("BACK: MENU");
 }
 
 void drawSequencerScreen() {
@@ -2714,70 +2895,12 @@ void drawSequencerScreen() {
     if (needsFullRedraw) {
         tft.fillScreen(COLOR_BG);
         drawHeader();
-    }
-    
-    const int infoY = 58;
-    
-    if (needsFullRedraw) {
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_ACCENT2);
-        tft.setCursor(10, infoY);
-        tft.print("SEQ");
         
-        tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(60, infoY);
-        tft.printf("PATTERN %d", currentPattern + 1);
-        
-        // Mostrar página actual
+        // Mostrar solo número de página pequeño en la esquina superior derecha
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_ACCENT);
-        tft.setCursor(180, infoY + 8);
-        tft.printf("PAGE %d/2", sequencerPage + 1);
-        
-        tft.setTextSize(2);
-        tft.setCursor(240, infoY);
         tft.setTextColor(COLOR_TEXT_DIM);
-        tft.print(patterns[currentPattern].name.c_str());
-        
-        // Mostrar instrumento actual resaltado con su color
-        tft.fillRoundRect(340, infoY - 2, 125, 22, 4, getInstrumentColor(selectedTrack));
-        tft.setTextColor(COLOR_BG);
-        tft.setCursor(347, infoY);
-        String instName = String(instrumentNames[selectedTrack]);
-        instName.trim();
-        tft.printf("%d:%s", selectedTrack + 1, instName.c_str());
-        
-        // BOTÓN PLAY/STOP
-        if (isPlaying) {
-            tft.fillRoundRect(330, 24, 65, 24, 4, COLOR_SUCCESS);
-            tft.setTextColor(COLOR_BG);
-            tft.setCursor(342, 28);
-            tft.print("PLAY");
-        } else {
-            tft.drawRoundRect(330, 24, 65, 24, 4, COLOR_BORDER);
-            tft.setTextColor(COLOR_TEXT_DIM);
-            tft.setCursor(342, 28);
-            tft.print("STOP");
-        }
-        
-        // BOTÓN SYNC - Solicitar patrón del MASTER
-        if (udpConnected) {
-            tft.fillRoundRect(400, 24, 70, 24, 4, COLOR_WARNING);
-            tft.setTextColor(COLOR_BG);
-            tft.setTextSize(1);
-            tft.setCursor(405, 27);
-            tft.print("SYNC");
-            tft.setCursor(405, 36);
-            tft.print("MASTER");
-        } else {
-            tft.fillRoundRect(400, 24, 70, 24, 4, 0x2104);
-            tft.setTextColor(COLOR_TEXT_DIM);
-            tft.setTextSize(1);
-            tft.setCursor(405, 27);
-            tft.print("SYNC");
-            tft.setCursor(405, 36);
-            tft.print("NO CON");
-        }
+        tft.setCursor(10, 58);
+        tft.printf("Page %d/2", sequencerPage + 1);
     }
     
     const int gridX = 8;
@@ -2907,9 +3030,11 @@ void drawSequencerScreen() {
         tft.setTextSize(1);
         tft.setTextColor(COLOR_TEXT_DIM);
         tft.setCursor(5, 305);
-        tft.print("S1-16:TOGGLE | ENC:TRACK | PLAY/STOP | MUTE(HOLD:CLEAR) | ");
-        tft.setTextColor(COLOR_WARNING);
-        tft.print("ENCODER+BACK:SYNC");
+        tft.print("S1-16:TOGGLE | ENC:TRACK | HOLD:BPM | ");
+        tft.setTextColor(COLOR_ACCENT);
+        tft.print("VOL-HOLD:PATTERN");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ENCODER+BACK:SYNC");
     }
 }
 
@@ -2917,148 +3042,152 @@ void drawSettingsScreen() {
     tft.fillScreen(COLOR_BG);
     drawHeader();
     
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(180, 58);
-    tft.println("SETTINGS");
-    
-    // ========== COLUMNA IZQUIERDA: SAMPLERS INFO ==========
-    const int leftX = 20;
-    const int sectionY = 95;
-    
+    // Título principal con badge
+    tft.fillRoundRect(150, 55, 180, 32, 8, COLOR_PRIMARY);
+    tft.drawRoundRect(150, 55, 180, 32, 8, COLOR_ACCENT);
     tft.setTextSize(2);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(leftX, sectionY);
-    tft.println("SAMPLERS");
-    tft.drawFastHLine(leftX, sectionY + 25, 200, COLOR_BORDER);
+    tft.setCursor(165, 63);
+    tft.print("SETTINGS");
     
-    // Mostrar información de samplers cargados
+    const int sectionY = 100;
+    
+    // ========== COLUMNA IZQUIERDA: SYSTEM INFO ==========
+    const int leftX = 30;
+    
+    // Panel System Info
+    tft.fillRoundRect(leftX, sectionY, 200, 28, 6, COLOR_PRIMARY);
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(leftX + 40, sectionY + 6);
+    tft.print("SYSTEM");
+    
+    tft.fillRoundRect(leftX, sectionY + 35, 200, 120, 10, COLOR_PRIMARY);
+    tft.drawRoundRect(leftX, sectionY + 35, 200, 120, 10, COLOR_ACCENT2);
+    
+    int infoY = sectionY + 48;
     tft.setTextSize(1);
+    
+    // Samplers
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(leftX + 10, infoY);
+    tft.print("SAMPLES:");
+    tft.setTextColor(COLOR_SUCCESS);
+    tft.setCursor(leftX + 100, infoY);
+    tft.print("16 x 16");
+    infoY += 18;
+    
+    // Memoria
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(leftX + 10, infoY);
+    tft.print("FREE RAM:");
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(leftX + 100, infoY);
+    uint32_t freeHeap = ESP.getFreeHeap();
+    tft.printf("%d KB", freeHeap / 1024);
+    infoY += 18;
+    
+    // Firmware
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(leftX + 10, infoY);
+    tft.print("VERSION:");
+    tft.setTextColor(COLOR_WARNING);
+    tft.setCursor(leftX + 100, infoY);
+    tft.print("v5.0");
+    infoY += 18;
+    
+    // Conexión
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(leftX + 10, infoY);
+    tft.print("MASTER:");
+    tft.setTextColor(udpConnected ? COLOR_SUCCESS : COLOR_ERROR);
+    tft.setCursor(leftX + 100, infoY);
+    tft.print(udpConnected ? "ONLINE" : "OFFLINE");
+    infoY += 18;
+    
+    // Pattern
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(leftX + 10, infoY);
+    tft.print("PATTERN:");
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(leftX + 100, infoY);
+    tft.printf("%d / %d", currentPattern + 1, MAX_PATTERNS);
+    infoY += 18;
+    
+    // Uptime
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(leftX + 10, infoY);
+    tft.print("UPTIME:");
     tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(leftX, sectionY + 35);
-    tft.print("Loaded from MASTER:");
+    tft.setCursor(leftX + 100, infoY);
+    uint32_t uptimeSeconds = millis() / 1000;
+    uint32_t hours = uptimeSeconds / 3600;
+    uint32_t minutes = (uptimeSeconds % 3600) / 60;
+    tft.printf("%02d:%02d", hours, minutes);
     
-    // Lista de instrumentos (primeros 8)
-    const char* instrList[] = {"BD", "SD", "CH", "OH", "CP", "CB", "RS", "CL"};
-    for (int i = 0; i < 8; i++) {
-        int y = sectionY + 55 + i * 20;
-        
-        // Cuadrado de color del instrumento
-        tft.fillRoundRect(leftX + 5, y, 14, 14, 2, getInstrumentColor(i));
-        
-        // Nombre del instrumento
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(leftX + 25, y + 3);
-        tft.printf("%02d: %s", i + 1, instrList[i]);
-        
-        // Estado
-        tft.setTextColor(COLOR_SUCCESS);
-        tft.setCursor(leftX + 60, y + 3);
-        tft.print("READY");
-    }
+    // ========== COLUMNA DERECHA: THEMES ==========
+    const int rightX = 250;
     
-    // ========== COLUMNA DERECHA: VISUAL THEMES ==========
-    const int rightX = 260;
-    
+    // Panel Themes
+    tft.fillRoundRect(rightX, sectionY, 200, 28, 6, COLOR_PRIMARY);
     tft.setTextSize(2);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(rightX, sectionY);
-    tft.println("THEMES");
-    tft.drawFastHLine(rightX, sectionY + 25, 200, COLOR_BORDER);
+    tft.setCursor(rightX + 40, sectionY + 6);
+    tft.print("THEMES");
     
+    // Theme selector (4 themes en 2x2)
     for (int i = 0; i < THEME_COUNT; i++) {
-        int y = sectionY + 40 + i * 45;
         const ColorTheme* theme = THEMES[i];
+        int col = i % 2;
+        int row = i / 2;
+        int x = rightX + 20 + col * 80;
+        int y = sectionY + 48 + row * 55;
         
         if (i == currentTheme) {
-            tft.fillRoundRect(rightX, y, 200, 38, 6, theme->accent);
-            tft.drawRoundRect(rightX, y, 200, 38, 6, theme->accent2);
-            tft.setTextSize(2);
-            tft.setTextColor(COLOR_TEXT);
-        } else {
-            tft.fillRoundRect(rightX, y, 200, 38, 6, theme->primary);
-            tft.setTextSize(2);
-            tft.setTextColor(theme->textDim);
+            tft.fillRoundRect(x - 3, y - 3, 66, 48, 6, COLOR_ACCENT);
         }
         
-        // Preview de color (cuadrado con color del tema)
-        tft.fillRoundRect(rightX + 10, y + 9, 20, 20, 3, theme->accent);
-        tft.drawRoundRect(rightX + 10, y + 9, 20, 20, 3, theme->accent2);
+        tft.fillRoundRect(x, y, 60, 42, 5, theme->primary);
+        tft.drawRoundRect(x, y, 60, 42, 5, theme->accent);
         
-        // Nombre del tema
-        tft.setTextSize(2);
-        tft.setTextColor(i == currentTheme ? COLOR_TEXT : theme->text);
-        tft.setCursor(rightX + 40, y + 11);
-        tft.print(theme->name);
+        // Indicador de color
+        tft.fillCircle(x + 30, y + 15, 10, theme->accent);
+        
+        // Label
+        tft.setTextSize(1);
+        tft.setTextColor(i == currentTheme ? COLOR_ACCENT : COLOR_TEXT_DIM);
+        tft.setCursor(x + 5, y + 32);
+        String label = String(theme->name);
+        if (label.length() > 7) label = label.substring(0, 7);
+        tft.print(label);
     }
     
-    // ========== SECCIÓN WIFI COMPACTA (debajo de themes) ==========
-    const int wifiY = sectionY + 220;
+    // ========== WIFI STATUS ==========
+    const int wifiY = sectionY + 165;
     
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(rightX, wifiY - 8);
-    tft.print("WIFI / WEB");
-    
-    // Box compacto
-    uint16_t wifiBg = webServerEnabled ? COLOR_PRIMARY_LIGHT : COLOR_BG;
-    uint16_t wifiBorder = webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR;
-    tft.fillRoundRect(rightX, wifiY, 200, 32, 6, wifiBg);
-    tft.drawRoundRect(rightX, wifiY, 200, 32, 6, wifiBorder);
-    
-    int iconX = rightX + 12;
-    int iconY = wifiY + 16;
-    
-    if (webServerEnabled) {
-        // Icono WiFi ON
-        tft.fillCircle(iconX, iconY, 2, COLOR_SUCCESS);
-        tft.drawArc(iconX, iconY, 5, 3, 210, 330, COLOR_SUCCESS, wifiBg);
-        tft.drawArc(iconX, iconY, 9, 7, 210, 330, COLOR_SUCCESS, wifiBg);
-        
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_SUCCESS);
-        tft.setCursor(iconX + 16, iconY - 8);
-        tft.print("ON");
-        
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(iconX + 50, iconY - 4);
-        tft.print("192.168.4.1");
-    } else {
-        // X roja OFF
-        tft.drawLine(iconX - 3, iconY - 3, iconX + 3, iconY + 3, COLOR_ERROR);
-        tft.drawLine(iconX + 3, iconY - 3, iconX - 3, iconY + 3, COLOR_ERROR);
-        
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_ERROR);
-        tft.setCursor(iconX + 16, iconY - 8);
-        tft.print("OFF");
-        
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(iconX + 52, iconY - 4);
-        tft.print("Disabled");
-    }
+    tft.fillRoundRect(rightX, wifiY, 200, 32, 6, webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR);
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(rightX + 40, wifiY + 8);
+    tft.print("WiFi: ");
+    tft.print(webServerEnabled ? "ON" : "OFF");
     
     // Footer con instrucciones
     tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
+    tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(10, 305);
-    tft.setTextColor(webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR);
     tft.print("S4:WiFi");
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print(" | ");
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(80, 305);
-    tft.print("|");
-    tft.setCursor(93, 305);
-    tft.print("S5-S7:THEME");
-    tft.setCursor(200, 305);
-    tft.print("|");
-    tft.setCursor(213, 305);
-    tft.print("BACK:MENU");
+    tft.print("S5-S7:Theme");
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print(" | ");
+    tft.setTextColor(COLOR_ACCENT);
+    tft.print("BACK:Menu");
 }
-
 
 void drawDiagnosticsScreen() {
     tft.fillScreen(COLOR_BG);
@@ -3147,46 +3276,57 @@ void drawHeader() {
     tft.setCursor(10, 10);
     tft.println("R808");
     
+    // Mostrar nombre de pantalla actual
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_ACCENT);
+    tft.setCursor(10, 36);
+    if (currentScreen == SCREEN_LIVE) {
+        tft.print("LIVE PADS");
+    } else if (currentScreen == SCREEN_SEQUENCER) {
+        tft.print("SEQUENCER");
+        // Mostrar instrumento activo con su color
+        tft.setTextSize(2);
+        tft.setTextColor(getInstrumentColor(selectedTrack));
+        tft.setCursor(100, 14);
+        String instName = String(instrumentNames[selectedTrack]);
+        instName.trim();
+        tft.print(instName.c_str());
+    } else if (currentScreen == SCREEN_SETTINGS) {
+        tft.print("SETTINGS");
+    } else if (currentScreen == SCREEN_DIAGNOSTICS) {
+        tft.print("DIAGNOSTICS");
+    } else if (currentScreen == SCREEN_PATTERNS) {
+        tft.print("PATTERNS");
+    }
+    
     tft.setTextSize(2);
     tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(100, 14);
+    tft.setCursor(240, 14);
     tft.printf("%d", tempo);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(140, 20);
+    tft.setCursor(280, 20);
     tft.print("BPM");
+    
+    // Mostrar patrón en sequencer
+    if (currentScreen == SCREEN_SEQUENCER) {
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(320, 14);
+        tft.printf("P%d", currentPattern + 1);
+    }
     
     // Mostrar ambos volúmenes con indicador de modo activo
     tft.setTextSize(1);
     tft.setTextColor(volumeMode == VOL_SEQUENCER ? COLOR_SUCCESS : COLOR_TEXT_DIM);
-    tft.setCursor(175, 12);
+    tft.setCursor(370, 12);
     tft.printf("SEQ:%d%%", sequencerVolume);
     
     tft.setTextColor(volumeMode == VOL_LIVE_PADS ? COLOR_SUCCESS : COLOR_TEXT_DIM);
-    tft.setCursor(175, 24);
-    // Mostrar volumen con boost visual (x1.25)
-    int boostedPadVol = min((int)(livePadsVolume * 1.25), MAX_VOLUME);
+    tft.setCursor(370, 24);
     tft.printf("PAD:%d%%", livePadsVolume);
-    if (boostedPadVol > livePadsVolume) {
-        tft.setTextColor(COLOR_WARNING);
-        tft.printf("+");
-    }
     
-    if (currentScreen == SCREEN_SEQUENCER) {
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(260, 14);
-        tft.printf("P%d", currentPattern + 1);
-        
-        // Mostrar instrumento completo con su color
-        tft.setTextColor(getInstrumentColor(selectedTrack));
-        tft.setCursor(300, 14);
-        String instName = String(instrumentNames[selectedTrack]);
-        instName.trim();
-        tft.print(instName.c_str());
-    }
-    
-    // Botón Play/Stop (esquina derecha)
+    // Icono Play/Stop (solo icono, sin texto)
     if (isPlaying) {
         tft.fillCircle(455, 24, 10, COLOR_SUCCESS);
         tft.fillTriangle(450, 18, 450, 30, 460, 24, COLOR_BG);
@@ -3198,184 +3338,247 @@ void drawHeader() {
 }
 
 void drawLivePad(int padIndex, bool highlight) {
-    const int padW = 108;
-    const int padH = 52;
-    const int startX = 10;
-    const int startY = 88;
+    const int padW = 106;
+    const int padH = 50;
+    const int startX = 16;
+    const int startY = 90;
     const int spacingX = 8;
-    const int spacingY = 6;
+    const int spacingY = 7;
     
     int col = padIndex % 4;
     int row = padIndex / 4;
     int x = startX + col * (padW + spacingX);
     int y = startY + row * (padH + spacingY);
     
-    // Pad principal con color único por instrumento
-    uint16_t padColor;
-    if (padIndex < MAX_TRACKS) {
-        padColor = getInstrumentColor(padIndex);
-    } else {
-        // Colores para pads 9-16
-        uint16_t extraColors[] = {
-            0xFD20,  // Naranja
-            0xFFE0,  // Amarillo
-            0x07FF,  // Cyan
-            0xF81F,  // Magenta
-            0xA817,  // Púrpura
-            0x2E86,  // Verde claro
-            0x3D8F,  // Azul claro
-            0xFBE0   // Rosa
-        };
-        padColor = extraColors[padIndex - MAX_TRACKS];
-    }
+    // Color del instrumento
+    uint16_t baseColor = getInstrumentColor(padIndex);
     
     if (highlight) {
-        // Efecto neón al presionar - brillo intenso
-        // Dibuja múltiples capas para efecto de brillo
-        for (int offset = 4; offset > 0; offset--) {
-            uint16_t glowColor = tft.color565(
-                min(255, (padColor >> 11) * 8 + offset * 30),
-                min(255, ((padColor >> 5) & 0x3F) * 4 + offset * 30),
-                min(255, (padColor & 0x1F) * 8 + offset * 30)
-            );
-            tft.drawRoundRect(x - offset, y - offset, padW + offset*2, padH + offset*2, 8, glowColor);
-        }
-        // Pad más brillante
-        tft.fillRoundRect(x, y, padW, padH, 8, TFT_WHITE);
-        tft.drawRoundRect(x, y, padW, padH, 8, padColor);
-    } else {
-        // Estado normal
-        // Sombra
-        tft.fillRoundRect(x + 2, y + 2, padW, padH, 8, 0x1000);
+        // Efecto de press: iluminar el pad completo
+        // Fondo más brillante pero no blanco
+        uint8_t r = min(255, ((baseColor >> 11) & 0x1F) * 8 + 100);
+        uint8_t g = min(255, ((baseColor >> 5) & 0x3F) * 4 + 50);
+        uint8_t b = min(255, (baseColor & 0x1F) * 8 + 100);
+        uint16_t brightColor = tft.color565(r, g, b);
         
-        tft.fillRoundRect(x, y, padW, padH, 8, padColor);
-        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_TEXT);
+        // Pad iluminado
+        tft.fillRoundRect(x, y, padW, padH, 5, brightColor);
+        tft.drawRoundRect(x, y, padW, padH, 5, TFT_WHITE);
+        
+        // Borde izquierdo brillante
+        tft.fillRect(x + 1, y + 1, 3, padH - 2, TFT_WHITE);
+    } else {
+        // Estado normal: oscurecido
+        uint8_t r = ((baseColor >> 11) & 0x1F) * 5;
+        uint8_t g = ((baseColor >> 5) & 0x3F) * 2;
+        uint8_t b = (baseColor & 0x1F) * 5;
+        uint16_t darkColor = tft.color565(r, g, b);
+        
+        tft.fillRoundRect(x, y, padW, padH, 5, darkColor);
+        tft.drawRoundRect(x, y, padW, padH, 5, baseColor);
+        tft.fillRect(x + 1, y + 1, 3, padH - 2, baseColor);
     }
     
     // Número del pad
-    tft.fillRoundRect(x + 5, y + 5, 22, 22, 4, highlight ? padColor : COLOR_BG);
-    tft.setTextSize(2);
-    tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT);
-    tft.setCursor(x + (padIndex < 9 ? 12 : 9), y + 9);
+    tft.setTextSize(1);
+    tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT_DIM);
+    tft.setCursor(x + 8, y + 5);
     tft.printf("%d", padIndex + 1);
     
     // Nombre del instrumento
-    tft.setTextSize(1);
-    tft.setTextColor(highlight ? padColor : COLOR_BG);
-    tft.setCursor(x + 32, y + 10);
-    if (padIndex < MAX_TRACKS) {
-        String instName = String(instrumentNames[padIndex]);
-        if (instName.length() > 10) {
-            instName = instName.substring(0, 10);
-        }
-        tft.println(instName.c_str());
-    } else {
-        tft.printf("PAD %d", padIndex + 1);
+    tft.setTextSize(2);
+    tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT);
+    String instName = String(instrumentNames[padIndex]);
+    instName.trim();
+    if (instName.length() > 6) {
+        instName = instName.substring(0, 6);
     }
+    int textWidth = instName.length() * 12;
+    tft.setCursor(x + (padW - textWidth) / 2, y + 18);
+    tft.print(instName);
     
-    // Botón TM1638
+    // Track name
     tft.setTextSize(1);
-    tft.setTextColor(highlight ? padColor : COLOR_BG);
-    tft.setCursor(x + padW - 20, y + padH - 12);
-    tft.printf("S%d", padIndex + 1);
+    tft.setTextColor(highlight ? TFT_WHITE : baseColor);
+    tft.setCursor(x + padW - 18, y + padH - 12);
+    tft.print(trackNames[padIndex]);
 }
 
-void drawCreditsScreen() {
-    tft.fillScreen(0x1800);  // Fondo rojo muy oscuro
+// ============================================
+// TM1638 DISPLAY UPDATES
+// ============================================
+
+void drawPatternsScreen() {
+    tft.fillScreen(COLOR_BG);
+    drawHeader();
     
-    // Header superior con gradiente simulado
-    tft.fillRect(0, 0, 480, 4, 0xF800);  // Línea roja brillante superior
-    tft.fillRect(0, 4, 480, 50, 0xC000);  // Rojo intenso
+    // Título principal
+    tft.fillRoundRect(120, 55, 240, 35, 8, COLOR_PRIMARY);
+    tft.drawRoundRect(120, 55, 240, 35, 8, COLOR_ACCENT);
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(135, 62);
+    tft.print("PATTERNS");
     
-    // Logo/Título principal
+    // Grid de patrones (6 patrones en 2 filas de 3)
+    const int maxPatterns = 6;
+    const int cols = 3;
+    const int rows = 2;
+    const int padW = 140;
+    const int padH = 80;
+    const int startX = 25;
+    const int startY = 110;
+    const int spacingX = 15;
+    const int spacingY = 15;
+    
+    for (int i = 0; i < maxPatterns; i++) {
+        int col = i % cols;
+        int row = i / cols;
+        int x = startX + col * (padW + spacingX);
+        int y = startY + row * (padH + spacingY);
+        
+        bool isSelected = (i == currentPattern);
+        
+        // Fondo del botón
+        if (isSelected) {
+            tft.fillRoundRect(x, y, padW, padH, 8, COLOR_ACCENT);
+            tft.drawRoundRect(x, y, padW, padH, 8, COLOR_ACCENT2);
+        } else {
+            tft.fillRoundRect(x, y, padW, padH, 8, COLOR_PRIMARY);
+            tft.drawRoundRect(x, y, padW, padH, 8, COLOR_BORDER);
+        }
+        
+        // Número de patrón (grande)
+        tft.setTextSize(4);
+        tft.setTextColor(isSelected ? COLOR_BG : COLOR_TEXT);
+        tft.setCursor(x + 15, y + 15);
+        tft.printf("%d", i + 1);
+        
+        // Nombre del patrón
+        tft.setTextSize(1);
+        tft.setTextColor(isSelected ? COLOR_BG : COLOR_TEXT_DIM);
+        tft.setCursor(x + 10, y + 60);
+        String patternName = patterns[i].name;
+        if (patternName.length() > 15) {
+            patternName = patternName.substring(0, 15);
+        }
+        tft.print(patternName);
+    }
+    
+    // Instrucciones en el footer
+    tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
+    tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);
+    
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(10, 305);
+    tft.print("ENCODER:Navigate");
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print(" | ");
+    tft.setTextColor(COLOR_ACCENT);
+    tft.print("ENTER:Select");
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print(" | ");
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.print("BACK:Menu");
+}
+
+void drawSinglePattern(int patternIndex, bool isSelected) {
+    // Redibujar un solo patrón sin parpadeo
+    if (patternIndex < 0 || patternIndex >= 6) return;
+    
+    const int cols = 3;
+    const int padW = 140;
+    const int padH = 80;
+    const int startX = 25;
+    const int startY = 110;
+    const int spacingX = 15;
+    const int spacingY = 15;
+    
+    int col = patternIndex % cols;
+    int row = patternIndex / cols;
+    int x = startX + col * (padW + spacingX);
+    int y = startY + row * (padH + spacingY);
+    
+    // Fondo del botón
+    if (isSelected) {
+        tft.fillRoundRect(x, y, padW, padH, 8, COLOR_ACCENT);
+        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_ACCENT2);
+    } else {
+        tft.fillRoundRect(x, y, padW, padH, 8, COLOR_PRIMARY);
+        tft.drawRoundRect(x, y, padW, padH, 8, COLOR_BORDER);
+    }
+    
+    // Número de patrón (grande)
     tft.setTextSize(4);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(100, 15);
-    tft.print("RED808 V5");
+    tft.setTextColor(isSelected ? COLOR_BG : COLOR_TEXT);
+    tft.setCursor(x + 15, y + 15);
+    tft.printf("%d", patternIndex + 1);
     
-    // Subtítulo
+    // Nombre del patrón
     tft.setTextSize(1);
-    tft.setTextColor(0xE73C);  // Gris cálido
-    tft.setCursor(175, 50);
-    tft.print("DRUM MACHINE");
+    tft.setTextColor(isSelected ? COLOR_BG : COLOR_TEXT_DIM);
+    tft.setCursor(x + 10, y + 60);
+    String patternName = patterns[patternIndex].name;
+    if (patternName.length() > 15) {
+        patternName = patternName.substring(0, 15);
+    }
+    tft.print(patternName);
+}
+
+void drawSyncingScreen() {
+    // Pantalla temporal de sincronización
+    tft.fillScreen(COLOR_BG);
     
-    // Línea divisoria elegante
-    tft.fillRect(40, 70, 400, 2, 0xF800);
+    // Caja central con mensaje
+    int boxW = 360;
+    int boxH = 140;
+    int boxX = (480 - boxW) / 2;
+    int boxY = (320 - boxH) / 2;
     
-    // Sección principal - THE BOYS
-    int y = 95;
+    // Fondo de la caja con glow
+    for (int i = 3; i > 0; i--) {
+        uint8_t brightness = map(i, 3, 1, 30, 80);
+        uint16_t glowColor = tft.color565(brightness, brightness, 0);
+        tft.drawRoundRect(boxX - i, boxY - i, boxW + i * 2, boxH + i * 2, 12, glowColor);
+    }
+    
+    tft.fillRoundRect(boxX, boxY, boxW, boxH, 10, COLOR_PRIMARY);
+    tft.drawRoundRect(boxX, boxY, boxW, boxH, 10, COLOR_WARNING);
+    tft.drawRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 8, COLOR_ACCENT);
+    
+    // Icono de búsqueda (círculo con puntos animados)
+    int centerX = 240;
+    int centerY = boxY + 50;
+    tft.drawCircle(centerX, centerY, 25, COLOR_WARNING);
+    tft.drawCircle(centerX, centerY, 23, COLOR_WARNING);
+    
+    // Puntos alrededor del círculo
+    for (int i = 0; i < 8; i++) {
+        float angle = i * 45 * PI / 180.0;
+        int x = centerX + cos(angle) * 30;
+        int y = centerY + sin(angle) * 30;
+        tft.fillCircle(x, y, 3, COLOR_ACCENT2);
+    }
+    
+    // Texto principal
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(boxX + 35, boxY + 95);
+    tft.print("BUSCANDO");
     
     tft.setTextSize(2);
-    tft.setTextColor(0xF800);  // Rojo brillante
-    tft.setCursor(130, y);
-    tft.print("THE BOYS");
-    y += 30;
+    tft.setTextColor(COLOR_ACCENT);
+    tft.setCursor(boxX + 85, boxY + 120);
+    tft.print("SINCRONIZACION");
     
-    // Marco elegante para los nombres
-    tft.drawRoundRect(55, y, 370, 90, 8, 0xC000);
-    tft.drawRoundRect(56, y+1, 368, 88, 8, 0xC000);
-    
-    y += 15;
-    
-    // Nombres del crew en columnas
-    tft.setTextSize(2);
-    tft.setTextColor(TFT_WHITE);
-    
-    // Columna 1
-    tft.setCursor(75, y);
-    tft.print("Freddy");
-    tft.setCursor(75, y + 25);
-    tft.print("Aithor");
-    tft.setCursor(75, y + 50);
-    tft.print("Karz");
-    
-    // Columna 2
-    tft.setCursor(205, y);
-    tft.print("Oriol");
-    tft.setCursor(205, y + 25);
-    tft.print("Victor");
-    
-    // Columna 3
-    tft.setCursor(315, y);
-    tft.print("Marcos");
-    tft.setCursor(315, y + 25);
-    tft.print("Adri");
-    
-    y += 90;
-    
-    // Línea divisoria
-    tft.fillRect(80, y, 320, 1, 0x9800);
-    y += 20;
-    
-    // Special Mention en estilo más sutil
+    // Mensaje inferior
     tft.setTextSize(1);
-    tft.setTextColor(0xFD20);  // Naranja-rojo
-    tft.setCursor(155, y);
-    tft.print("SPECIAL MENTION");
-    y += 18;
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.setCursor(boxX + 90, boxY + boxH - 15);
+    tft.print("Conectando al MASTER...");
     
-    tft.setTextSize(2);
-    tft.setTextColor(0xE73C);  // Gris cálido
-    tft.setCursor(160, y);
-    tft.print("Javi");
-    tft.setTextColor(0xAD55);
-    tft.print(" & ");
-    tft.setTextColor(0xE73C);
-    tft.print("Rottem");
-    
-    // Footer corporativo
-    tft.fillRect(0, 295, 480, 25, 0xC000);
-    tft.fillRect(0, 295, 480, 2, 0xF800);  // Línea superior brillante
-    
-    tft.setTextSize(1);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(10, 300);
-    tft.print("Development by Cesko");
-    tft.setCursor(10, 310);
-    tft.print("Lloret de mar 2026");
-    
-    tft.setCursor(360, 305);
-    tft.print("[BACK] Menu");
+    delay(500);  // Mostrar por medio segundo para que sea visible
 }
 
 // ============================================
@@ -3397,11 +3600,17 @@ void changePattern(int delta) {
     currentStep = 0;
     needsFullRedraw = true;
     
-    // Enviar al MASTER
+    // Enviar cambio de patrón al MASTER
     JsonDocument doc;
-    doc["cmd"] = "pattern";
-    doc["value"] = currentPattern;
+    doc["cmd"] = "selectPattern";
+    doc["index"] = currentPattern;
     sendUDPCommand(doc);
+    
+    // Esperar un poco y solicitar el nuevo patrón automáticamente
+    delay(50);
+    requestPatternFromMaster();
+    
+    Serial.printf("► Pattern changed to %d, requesting sync...\n", currentPattern + 1);
 }
 
 void changeKit(int delta) {
