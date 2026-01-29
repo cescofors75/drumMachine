@@ -4,9 +4,9 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
-#include <LittleFS.h>
-#include <FS.h>
+// #include <ESPAsyncWebServer.h>  // DESHABILITADO - No se usa en SLAVE
+// #include <LittleFS.h>  // DESHABILITADO - No se usa en SLAVE
+// #include <FS.h>  // DESHABILITADO - No se usa en SLAVE
 
 // ============================================
 // PIN DEFINITIONS
@@ -287,8 +287,8 @@ IPAddress subnet(255, 255, 255, 0);
 */
 
 WiFiUDP udp;
-AsyncWebServer server(80);
-bool webServerEnabled = false;
+// AsyncWebServer server(80);  // DESHABILITADO - No usado en SLAVE
+bool webServerEnabled = false;  // Siempre false en SLAVE
 
 int selectedTrack = 0;
 int selectedStep = 0;
@@ -450,7 +450,6 @@ void updateStepLEDsForTrack(int track);
 void updateLEDFeedback();
 void updateAudioVisualization();
 void changeTempo(int delta);
-void setupWebServer();
 void changePattern(int delta);
 void changeKit(int delta);
 void changeTheme(int delta);
@@ -883,53 +882,26 @@ void calculateStepInterval() {
     stepInterval = (60000 / tempo) / 4;
 }
 
+// ============================================
+// WEB SERVER - DESHABILITADO EN SLAVE
+// ============================================
+// El SLAVE no necesita servidor web, solo envía comandos UDP al MASTER
+// Funciones deshabilitadas para mejorar performance y reducir uso de RAM
+
+/*
 void enableWebServer() {
-    if (!webServerEnabled) {
-        WiFi.mode(WIFI_AP);
-        
-        // Configurar IP estática del AP y rango DHCP para evitar conflictos
-        IPAddress local_IP(192, 168, 4, 1);
-        IPAddress gateway(192, 168, 4, 1);
-        IPAddress subnet(255, 255, 255, 0);
-        
-        // Configurar el servidor DHCP para asignar IPs desde .10 hasta .20
-        // Esto evita conflictos con IPs fijas en .2, .3, etc.
-        WiFi.softAPConfig(local_IP, gateway, subnet);
-        
-        WiFi.softAP(ssid, password);
-        
-        // Configuración DHCP: inicio en .10, asigna hasta 11 direcciones (.10 a .20)
-        // Esto deja .2-.9 libres para dispositivos con IP fija
-        // Nota: softAPdhcps() requiere compilación con opciones específicas
-        // Por defecto ESP32 asignará desde .2, pero con 11 clientes max ayuda
-        
-        server.begin();
-        webServerEnabled = true;
-        needsHeaderUpdate = true;
-        Serial.println("► WiFi y Servidor Web ACTIVADOS");
-        Serial.printf("► IP Address: %s\n", WiFi.softAPIP().toString().c_str());
-        Serial.println("► DHCP range: 192.168.4.2 - 192.168.4.254");
-    }
+    // DESHABILITADO - No se usa en SLAVE
 }
 
 void disableWebServer() {
-    if (webServerEnabled) {
-        server.end();
-        WiFi.softAPdisconnect(true);
-        WiFi.mode(WIFI_OFF);
-        webServerEnabled = false;
-        needsHeaderUpdate = true;
-        Serial.println("► WiFi y Servidor Web DESACTIVADOS");
-    }
+    // DESHABILITADO - No se usa en SLAVE  
 }
 
 void toggleWebServer() {
-    if (webServerEnabled) {
-        disableWebServer();
-    } else {
-        enableWebServer();
-    }
+    // DESHABILITADO - No se usa en SLAVE
 }
+*/
+
 /*
 void setupSDCard() {
     tft.fillScreen(COLOR_BG);
@@ -1809,10 +1781,10 @@ void handleButtons() {
                     currentKit = i;
                     drawSettingsScreen();
                 } else if (i == 3) {
-                    // S4: Toggle WiFi (local)
-                    toggleWebServer();
-                    drawSettingsScreen();
-                    Serial.printf("► WiFi %s desde Settings (S4)\n", webServerEnabled ? "activado" : "desactivado");
+                    // S4: (Deshabilitado - antes era Toggle WiFi)
+                    // toggleWebServer();  // DESHABILITADO
+                    // drawSettingsScreen();
+                    Serial.println("► S4: Web server deshabilitado en SLAVE");
                 } else if (i >= 4 && i < 4 + THEME_COUNT && (i - 4) < THEME_COUNT) {
                     // S5-S7: Cambiar theme (local)
                     int newTheme = i - 4;
@@ -3338,12 +3310,12 @@ void drawHeader() {
 }
 
 void drawLivePad(int padIndex, bool highlight) {
-    const int padW = 106;
-    const int padH = 50;
-    const int startX = 16;
-    const int startY = 90;
-    const int spacingX = 8;
-    const int spacingY = 7;
+    const int padW = 110;  // Igual que drawLiveScreen
+    const int padH = 54;   // Igual que drawLiveScreen
+    const int startX = 14; // Igual que drawLiveScreen
+    const int startY = 60; // Igual que drawLiveScreen
+    const int spacingX = 7; // Igual que drawLiveScreen
+    const int spacingY = 6; // Igual que drawLiveScreen
     
     int col = padIndex % 4;
     int row = padIndex / 4;
@@ -3676,11 +3648,11 @@ void toggleStep(int track, int step) {
 }
 
 // ============================================
-// SERVIDOR WEB ASYNC - MONITOREO RED808
+// SERVIDOR WEB ASYNC - DESHABILITADO EN SLAVE
 // ============================================
+// El SLAVE no necesita servidor web, toda la función está comentada
+/*
 void setupWebServer() {
-    // Inicializar LittleFS
-    bool fsOK = LittleFS.begin(true);
     if (!fsOK) {
         Serial.println("✗ Error montando LittleFS - servidor continuará sin archivos");
     } else {
@@ -4080,3 +4052,5 @@ void setupWebServer() {
     Serial.println("► WebServer INICIADO en http://" + WiFi.softAPIP().toString());
     Serial.println("► Interfaz web profesional disponible");
 }
+*/
+// Función setupWebServer() completamente comentada - SLAVE no requiere servidor web
